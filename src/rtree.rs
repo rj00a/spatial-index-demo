@@ -1,3 +1,4 @@
+use std::f32::consts::E;
 use std::mem;
 
 use approx::relative_eq;
@@ -66,7 +67,7 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                     .min_by_key(|(_, child_aabr)| {
                         OrderedFloat(area(child_aabr.union(data_aabr)) - data_aabr_area)
                     })
-                    .expect("must have at least one child");
+                    .expect("internal node must have at least one child");
 
                 match best_child.insert(data, internal_split_buf, leaf_split_buf) {
                     InsertResult::Ok => {
@@ -95,6 +96,8 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
             Self::Leaf(children) => {
                 if children.is_full() {
                     let other = split_node(leaf_split_buf, children, data, |e| e.get_aabr());
+                    debug_assert!(other.len() >= M / 2);
+
                     InsertResult::Split(Box::new(Node::Leaf(other)))
                 } else {
                     children.push(data);
@@ -123,22 +126,20 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
         }
     }
 
-    /// Returns true if the current node should be removed from its parent.
     fn retain(
         &mut self,
-        bounds: Aabr<f32>,
+        bounds: Option<Aabr<f32>>, // `None` when self is root.
         collides: &mut impl FnMut(Aabr<f32>) -> bool,
         retain: &mut impl FnMut(&mut T) -> bool,
         reinsert_buf: &mut Vec<T>,
     ) -> RetainResult {
         match self {
             Node::Internal(children) => {
-                debug_assert!(children.len() >= M / 2);
                 let mut recalculate_bounds = false;
 
                 children.retain(|(child, child_aabr)| {
                     if collides(*child_aabr) {
-                        match child.retain(*child_aabr, collides, retain, reinsert_buf) {
+                        match child.retain(Some(*child_aabr), collides, retain, reinsert_buf) {
                             RetainResult::Ok => true,
                             RetainResult::Deleted => {
                                 recalculate_bounds = true;
@@ -155,17 +156,22 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                     }
                 });
 
-                if children.len() < M / 2 {
-                    for (child, _) in children.drain(..) {
-                        child.collect_orphans(reinsert_buf);
-                    }
-                    RetainResult::Deleted
-                } else if recalculate_bounds {
-                    let new_bounds = self.bounds();
-                    debug_assert!(bounds.contains_aabr(new_bounds));
+                if let Some(bounds) = bounds {
+                    if children.len() < M / 2 {
+                        // TODO: don't delete if the root.
+                        for (child, _) in children.drain(..) {
+                            child.collect_orphans(reinsert_buf);
+                        }
+                        RetainResult::Deleted
+                    } else if recalculate_bounds {
+                        let new_bounds = self.bounds();
+                        debug_assert!(bounds.contains_aabr(new_bounds));
 
-                    if bounds != new_bounds {
-                        RetainResult::ShrunkAabr(new_bounds)
+                        if bounds != new_bounds {
+                            RetainResult::ShrunkAabr(new_bounds)
+                        } else {
+                            RetainResult::Ok
+                        }
                     } else {
                         RetainResult::Ok
                     }
@@ -174,7 +180,6 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                 }
             }
             Node::Leaf(children) => {
-                debug_assert!(children.len() >= M / 2);
                 let mut recalculate_bounds = false;
 
                 let mut i = 0;
@@ -185,11 +190,15 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                         if retain(child) {
                             let after = child.get_aabr();
                             if before != after {
-                                recalculate_bounds = true;
-                                // A child can move within a leaf node without reinsertion
-                                // as long as it does not increase the bounds of the leaf.
-                                if !bounds.contains_aabr(after) {
-                                    reinsert_buf.push(children.swap_remove(i));
+                                if let Some(bounds) = bounds {
+                                    recalculate_bounds = true;
+                                    // A child can move within a leaf node without reinsertion
+                                    // as long as it does not increase the bounds of the leaf.
+                                    if !bounds.contains_aabr(after) {
+                                        reinsert_buf.push(children.swap_remove(i));
+                                    } else {
+                                        i += 1;
+                                    }
                                 } else {
                                     i += 1;
                                 }
@@ -205,15 +214,19 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                     }
                 }
 
-                if children.len() < M / 2 {
-                    reinsert_buf.extend(children.drain(..));
-                    RetainResult::Deleted
-                } else if recalculate_bounds {
-                    let new_bounds = self.bounds();
-                    debug_assert!(bounds.contains_aabr(new_bounds));
+                if let Some(bounds) = bounds {
+                    if children.len() < M / 2 {
+                        reinsert_buf.extend(children.drain(..));
+                        RetainResult::Deleted
+                    } else if recalculate_bounds {
+                        let new_bounds = self.bounds();
+                        debug_assert!(bounds.contains_aabr(new_bounds));
 
-                    if bounds != new_bounds {
-                        RetainResult::ShrunkAabr(new_bounds)
+                        if bounds != new_bounds {
+                            RetainResult::ShrunkAabr(new_bounds)
+                        } else {
+                            RetainResult::Ok
+                        }
                     } else {
                         RetainResult::Ok
                     }
@@ -255,6 +268,38 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
             }
         }
     }
+
+    fn check_invariants(&self, bounds: Option<Aabr<f32>>) {
+        // TODO: check depth
+        match self {
+            Node::Internal(children) => {
+                for (child, child_aabr) in children {
+                    if let Some(bounds) = bounds {
+                        assert!(bounds.contains_aabr(*child_aabr));
+                    }
+                    child.check_invariants(Some(*child_aabr));
+                }
+            }
+            Node::Leaf(children) => {
+                for child in children {
+                    if let Some(bounds) = bounds {
+                        assert!(bounds.contains_aabr(child.get_aabr()));
+                    }
+                }
+            }
+        }
+
+        if let Some(bounds) = bounds {
+            assert!(bounds == self.bounds());
+        }
+    }
+
+    fn dbg_print(&self) {
+        match self {
+            Node::Internal(children) => eprintln!("Internal, #children = {}", children.len()),
+            Node::Leaf(children) => eprintln!("Leaf, #children = {}", children.len()),
+        }
+    }
 }
 
 pub trait GetAabr {
@@ -278,6 +323,8 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
 
     pub fn insert(&mut self, data: T) {
         assert!(M >= 2, "bad max node capacity");
+
+        self.root.dbg_print();
 
         if let InsertResult::Split(new_node) =
             self.root
@@ -305,17 +352,8 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
         mut collides: impl FnMut(Aabr<f32>) -> bool,
         mut retain: impl FnMut(&mut T) -> bool,
     ) {
-        let root_bounds = Aabr {
-            min: -Vec2::broadcast(f32::INFINITY),
-            max: Vec2::broadcast(f32::INFINITY),
-        };
-
-        self.root.retain(
-            root_bounds,
-            &mut collides,
-            &mut retain,
-            &mut self.reinsert_buf,
-        );
+        self.root
+            .retain(None, &mut collides, &mut retain, &mut self.reinsert_buf);
 
         if let Node::Internal(children) = &mut self.root {
             if children.len() == 1 {
@@ -339,9 +377,32 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
         self.root.query(&mut collides, &mut callback)
     }
 
+    pub fn clear(&mut self) {
+        self.root = Node::Leaf(ArrayVec::new());
+        self.len = 0;
+    }
+
     /// For the purposes of rendering the RTree.
     pub fn visit(&self, mut f: impl FnMut(Aabr<f32>, usize)) {
         self.root.visit(&mut f, None, 0);
+    }
+
+    fn check_invariants(&self) {
+        // TODO: check len.
+
+        assert!(self.internal_split_buf.is_empty());
+        assert!(self.leaf_split_buf.is_empty());
+        assert!(self.reinsert_buf.is_empty());
+
+        if let Node::Internal(children) = &self.root {
+            assert!(
+                children.len() != 1,
+                "internal root with a single entry should become the child"
+            );
+            assert!(!children.is_empty(), "empty internal root should be a leaf");
+        }
+
+        self.root.check_invariants(None);
     }
 }
 
@@ -449,4 +510,69 @@ fn area(aabr: Aabr<f32>) -> f32 {
 
 fn perimeter(aabr: Aabr<f32>) -> f32 {
     (aabr.max - aabr.min).sum() * 2.0
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::Rng;
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct Data {
+        aabr: Aabr<f32>,
+        unique_id: u32,
+    }
+
+    impl GetAabr for Data {
+        fn get_aabr(&self) -> Aabr<f32> {
+            self.aabr
+        }
+    }
+
+    #[test]
+    fn insert_delete_invariants() {
+        let mut rtree: RTree<Data, 8> = RTree::new();
+        let mut rng = rand::thread_rng();
+        let mut next_unique_id = 0;
+
+        let mut gen_data = || {
+            let min = Vec2::new(rng.gen(), rng.gen());
+            let max = Vec2::new(
+                min.x + rng.gen_range(0.003..=0.01),
+                min.y + rng.gen_range(0.003..=0.01),
+            );
+
+            next_unique_id += 1;
+            Data {
+                aabr: Aabr { min, max },
+                unique_id: next_unique_id,
+            }
+        };
+
+        for _ in 0..10_000 {
+            let data_0 = gen_data();
+            let data_1 = gen_data();
+
+            rtree.insert(data_0);
+            rtree.insert(data_1);
+
+            let mut found = false;
+            rtree.retain(
+                |aabr| aabr.collides_with_aabr(data_1.aabr),
+                |data| {
+                    if data.unique_id == data_1.unique_id {
+                        assert!(!found);
+                        found = true;
+                        false
+                    } else {
+                        true
+                    }
+                },
+            );
+            assert!(found);
+
+            rtree.check_invariants();
+        }
+    }
 }
