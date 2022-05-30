@@ -1,0 +1,17 @@
+[package]
+name = "rtree-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rayon = "1.5.3"
+vek = "0.15.8"
+rand = "0.8.5"
+arrayvec = "0.7.2"
+ordered-float = "3.0.0"
+approx = "0.5.1"
+
+[dependencies.sdl2]
+version = "0.35.2"
+default-features = false
+features = ["ttf"]
