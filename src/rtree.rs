@@ -1,3 +1,6 @@
+// TODO: parallel query and retain?
+// TODO: improve insertion heuristic.
+
 use std::mem;
 
 use approx::relative_eq;
@@ -274,29 +277,41 @@ impl<T, const M: usize> Node<T, M> {
         }
     }
 
-    fn check_invariants(&self, bounds: Option<Aabr<f32>>) {
-        // TODO: check depth
+    #[cfg(test)]
+    fn check_invariants(&self, bounds: Option<Aabr<f32>>, depth: usize) -> usize {
+        let mut child_depth = None;
+        
         match self {
             Node::Internal(children) => {
+                assert!(!children.is_empty());
+
                 for (child, child_aabr) in children {
                     if let Some(bounds) = bounds {
                         assert!(bounds.contains_aabr(*child_aabr));
                     }
-                    child.check_invariants(Some(*child_aabr));
+                    let d = child.check_invariants(Some(*child_aabr), depth + 1);
+                    if let Some(child_depth) = &mut child_depth {
+                        assert_eq!(*child_depth, d, "rtree is not balanced");
+                    } else {
+                        child_depth = Some(d);
+                    }
                 }
             }
             Node::Leaf(children) => {
-                for (child, child_aabr) in children {
+                for (_, child_aabr) in children {
                     if let Some(bounds) = bounds {
                         assert!(bounds.contains_aabr(*child_aabr));
                     }
                 }
+                child_depth = Some(depth);
             }
         }
 
         if let Some(bounds) = bounds {
             assert!(bounds == self.bounds());
         }
+
+        child_depth.unwrap()
     }
 
     fn dbg_print(&self) {
@@ -388,6 +403,7 @@ impl<T, const M: usize> RTree<T, M> {
         self.root.visit(&mut f, None, 0);
     }
 
+    #[cfg(test)]
     fn check_invariants(&self) {
         assert!(self.internal_split_buf.is_empty());
         assert!(self.leaf_split_buf.is_empty());
@@ -401,7 +417,7 @@ impl<T, const M: usize> RTree<T, M> {
             assert!(!children.is_empty(), "empty internal root should be a leaf");
         }
 
-        self.root.check_invariants(None);
+        self.root.check_invariants(None, 0);
     }
 }
 
