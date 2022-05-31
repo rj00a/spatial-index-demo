@@ -1,5 +1,5 @@
-// TODO: parallel query and retain?
 // TODO: improve insertion heuristic.
+// TODO: run clippy
 
 use std::mem;
 
@@ -60,14 +60,12 @@ impl<T, const M: usize> Node<T, M> {
     ) -> InsertResult<T, M> {
         match self {
             Self::Internal(children) => {
-                let data_aabr_area = area(data_aabr);
-
                 let children_is_full = children.is_full();
 
                 let (best_child, best_child_aabr) = children
                     .iter_mut()
                     .min_by_key(|(_, child_aabr)| {
-                        OrderedFloat(area(child_aabr.union(data_aabr)) - data_aabr_area)
+                        OrderedFloat(area(child_aabr.union(data_aabr)) - area(*child_aabr));
                     })
                     .expect("internal node must have at least one child");
 
@@ -85,7 +83,7 @@ impl<T, const M: usize> Node<T, M> {
                                 internal_split_buf,
                                 children,
                                 (new_node, new_node_aabr),
-                                |e| e.1,
+                                |(_, child_aabr)| *child_aabr,
                             );
                             InsertResult::Split(Box::new(Node::Internal(other)))
                         } else {
@@ -290,10 +288,16 @@ impl<T, const M: usize> Node<T, M> {
             Node::Internal(children) => {
                 assert!(!children.is_empty());
 
+                if let Some(bounds) = bounds {
+                    let tight_bounds = self.bounds();
+                    assert!(
+                        relative_eq!(tight_bounds.min, bounds.min)
+                            && relative_eq!(tight_bounds.max, bounds.max),
+                        "bounding rectangle for internal node is not tight"
+                    );
+                }
+
                 for (child, child_aabr) in children {
-                    if let Some(bounds) = bounds {
-                        assert!(bounds.contains_aabr(*child_aabr));
-                    }
                     let d = child.check_invariants(Some(*child_aabr), depth + 1, len_counter);
                     if let Some(child_depth) = &mut child_depth {
                         assert_eq!(*child_depth, d, "rtree is not balanced");
@@ -303,11 +307,15 @@ impl<T, const M: usize> Node<T, M> {
                 }
             }
             Node::Leaf(children) => {
-                for (_, child_aabr) in children {
-                    if let Some(bounds) = bounds {
-                        assert!(bounds.contains_aabr(*child_aabr));
-                    }
+                if let Some(bounds) = bounds {
+                    let tight_bounds = self.bounds();
+                    assert!(
+                        relative_eq!(tight_bounds.min, bounds.min)
+                            && relative_eq!(tight_bounds.max, bounds.max),
+                        "bounding rectangle for leaf node is not tight"
+                    );
                 }
+
                 *len_counter += children.len();
                 child_depth = Some(depth);
             }
@@ -606,7 +614,22 @@ mod tests {
             rtree.check_invariants(i + 1);
         }
 
-        rtree.retain(|_| true, |_, _| false);
+        let mut delete_count = 0;
+
+        rtree.retain(
+            |_| true,
+            |_, _| {
+                if rand::random() {
+                    delete_count += 1;
+                    false
+                } else {
+                    true
+                }
+            },
+        );
+        rtree.check_invariants(5_000 - delete_count);
+
+        rtree.clear();
         rtree.check_invariants(0);
     }
 
@@ -619,7 +642,7 @@ mod tests {
         }
 
         let mut rng = rand::thread_rng();
-        for i in 0..100 {
+        for _ in 0..100 {
             rtree.retain(
                 |_| true,
                 |_, aabr| {
