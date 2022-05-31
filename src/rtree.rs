@@ -7,7 +7,6 @@ use vek::Aabr;
 
 pub struct RTree<T, const M: usize> {
     root: Node<T, M>,
-    len: usize,
     // The bufs are put here to reuse their allocations.
     internal_split_buf: InternalBuf<T, M>,
     leaf_split_buf: LeafBuf<T>,
@@ -312,15 +311,10 @@ impl<T, const M: usize> RTree<T, M> {
     pub fn new() -> Self {
         Self {
             root: Node::Leaf(ArrayVec::new()),
-            len: 0,
             internal_split_buf: Vec::new(),
             leaf_split_buf: Vec::new(),
             reinsert_buf: Vec::new(),
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.len as usize
     }
 
     pub fn insert(&mut self, data: T, data_aabr: Aabr<f32>) {
@@ -345,8 +339,6 @@ impl<T, const M: usize> RTree<T, M> {
                 Node::Leaf(_) => unreachable!(),
             }
         }
-
-        self.len += 1;
     }
 
     pub fn retain(
@@ -377,8 +369,6 @@ impl<T, const M: usize> RTree<T, M> {
 
         // Don't waste too much memory after a large restructuring.
         self.reinsert_buf.shrink_to(M * 2);
-
-        // TODO: set len
     }
 
     pub fn query(
@@ -391,7 +381,6 @@ impl<T, const M: usize> RTree<T, M> {
 
     pub fn clear(&mut self) {
         self.root = Node::Leaf(ArrayVec::new());
-        self.len = 0;
     }
 
     /// For the purposes of rendering the RTree.
@@ -400,8 +389,6 @@ impl<T, const M: usize> RTree<T, M> {
     }
 
     fn check_invariants(&self) {
-        // TODO: check len.
-
         assert!(self.internal_split_buf.is_empty());
         assert!(self.leaf_split_buf.is_empty());
         assert!(self.reinsert_buf.is_empty());
@@ -608,7 +595,7 @@ mod tests {
                 |_| true,
                 |_, aabr| {
                     let angle = rng.gen_range(0.0..TAU);
-                    let v = Vec2::new(angle.cos(), angle.sin()) * 0.3;
+                    let v = Vec2::new(angle.cos(), angle.sin()) * 0.003;
 
                     aabr.min += v;
                     aabr.max += v;
