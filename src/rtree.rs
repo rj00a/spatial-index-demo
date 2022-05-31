@@ -1,28 +1,28 @@
-use std::f32::consts::E;
 use std::mem;
 
 use approx::relative_eq;
 use arrayvec::ArrayVec;
 use ordered_float::OrderedFloat;
-use vek::{Aabr, Vec2};
+use vek::Aabr;
 
 pub struct RTree<T, const M: usize> {
     root: Node<T, M>,
     len: usize,
     // The bufs are put here to reuse their allocations.
-    internal_split_buf: InternalSplitBuf<T, M>,
-    leaf_split_buf: Vec<T>,
-    reinsert_buf: Vec<T>,
+    internal_split_buf: InternalBuf<T, M>,
+    leaf_split_buf: LeafBuf<T>,
+    reinsert_buf: LeafBuf<T>,
 }
 
-type InternalSplitBuf<T, const M: usize> = Vec<(Box<Node<T, M>>, Aabr<f32>)>;
+type InternalBuf<T, const M: usize> = Vec<(Box<Node<T, M>>, Aabr<f32>)>;
+type LeafBuf<T> = Vec<(T, Aabr<f32>)>;
 
 enum Node<T, const M: usize> {
     Internal(ArrayVec<(Box<Node<T, M>>, Aabr<f32>), M>),
-    Leaf(ArrayVec<T, M>),
+    Leaf(ArrayVec<(T, Aabr<f32>), M>),
 }
 
-impl<T: GetAabr, const M: usize> Node<T, M> {
+impl<T, const M: usize> Node<T, M> {
     fn is_internal(&self) -> bool {
         match self {
             Node::Internal(_) => true,
@@ -43,7 +43,7 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                 .unwrap(),
             Node::Leaf(children) => children
                 .iter()
-                .map(|t| t.get_aabr())
+                .map(|(_, aabr)| *aabr)
                 .reduce(|l, r| l.union(r))
                 .unwrap(),
         }
@@ -52,12 +52,12 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
     fn insert(
         &mut self,
         data: T,
-        internal_split_buf: &mut InternalSplitBuf<T, M>,
-        leaf_split_buf: &mut Vec<T>,
+        data_aabr: Aabr<f32>,
+        internal_split_buf: &mut InternalBuf<T, M>,
+        leaf_split_buf: &mut LeafBuf<T>,
     ) -> InsertResult<T, M> {
         match self {
             Self::Internal(children) => {
-                let data_aabr = data.get_aabr();
                 let data_aabr_area = area(data_aabr);
 
                 let children_is_full = children.is_full();
@@ -69,7 +69,7 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                     })
                     .expect("internal node must have at least one child");
 
-                match best_child.insert(data, internal_split_buf, leaf_split_buf) {
+                match best_child.insert(data, data_aabr, internal_split_buf, leaf_split_buf) {
                     InsertResult::Ok => {
                         best_child_aabr.expand_to_contain(data_aabr);
                         InsertResult::Ok
@@ -95,19 +95,28 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
             }
             Self::Leaf(children) => {
                 if children.is_full() {
-                    let other = split_node(leaf_split_buf, children, data, |e| e.get_aabr());
+                    let other = split_node(
+                        leaf_split_buf,
+                        children,
+                        (data, data_aabr),
+                        |(_, data_aabr)| *data_aabr,
+                    );
                     debug_assert!(other.len() >= M / 2);
 
                     InsertResult::Split(Box::new(Node::Leaf(other)))
                 } else {
-                    children.push(data);
+                    children.push((data, data_aabr));
                     InsertResult::Ok
                 }
             }
         }
     }
 
-    fn query(&self, collides: &mut impl FnMut(Aabr<f32>) -> bool, callback: &mut impl FnMut(&T)) {
+    fn query(
+        &self,
+        collides: &mut impl FnMut(Aabr<f32>) -> bool,
+        callback: &mut impl FnMut(&T, Aabr<f32>),
+    ) {
         match self {
             Node::Internal(children) => {
                 for child in children {
@@ -117,9 +126,9 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                 }
             }
             Node::Leaf(children) => {
-                for child in children {
-                    if collides(child.get_aabr()) {
-                        callback(child);
+                for (child, child_aabr) in children {
+                    if collides(*child_aabr) {
+                        callback(child, *child_aabr);
                     }
                 }
             }
@@ -130,8 +139,8 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
         &mut self,
         bounds: Option<Aabr<f32>>, // `None` when self is root.
         collides: &mut impl FnMut(Aabr<f32>) -> bool,
-        retain: &mut impl FnMut(&mut T) -> bool,
-        reinsert_buf: &mut Vec<T>,
+        retain: &mut impl FnMut(&mut T, &mut Aabr<f32>) -> bool,
+        reinsert_buf: &mut LeafBuf<T>,
     ) -> RetainResult {
         match self {
             Node::Internal(children) => {
@@ -158,7 +167,6 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
 
                 if let Some(bounds) = bounds {
                     if children.len() < M / 2 {
-                        // TODO: don't delete if the root.
                         for (child, _) in children.drain(..) {
                             child.collect_orphans(reinsert_buf);
                         }
@@ -184,11 +192,11 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
 
                 let mut i = 0;
                 while i < children.len() {
-                    let child = &mut children[i];
-                    let before = child.get_aabr();
+                    let (child, child_aabr) = &mut children[i];
+                    let before = *child_aabr;
                     if collides(before) {
-                        if retain(child) {
-                            let after = child.get_aabr();
+                        if retain(child, child_aabr) {
+                            let after = *child_aabr;
                             if before != after {
                                 if let Some(bounds) = bounds {
                                     recalculate_bounds = true;
@@ -237,16 +245,14 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
         }
     }
 
-    fn collect_orphans(self, reinsert_buf: &mut Vec<T>) {
+    fn collect_orphans(self, reinsert_buf: &mut LeafBuf<T>) {
         match self {
             Node::Internal(children) => {
                 for (child, _) in children {
                     child.collect_orphans(reinsert_buf);
                 }
             }
-            Node::Leaf(children) => {
-                reinsert_buf.extend(children);
-            }
+            Node::Leaf(children) => reinsert_buf.extend(children),
         }
     }
 
@@ -262,8 +268,8 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                 }
             }
             Node::Leaf(children) => {
-                for child in children {
-                    f(child.get_aabr(), level + 1);
+                for (_, child_aabr) in children {
+                    f(*child_aabr, level + 1);
                 }
             }
         }
@@ -281,9 +287,9 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
                 }
             }
             Node::Leaf(children) => {
-                for child in children {
+                for (child, child_aabr) in children {
                     if let Some(bounds) = bounds {
-                        assert!(bounds.contains_aabr(child.get_aabr()));
+                        assert!(bounds.contains_aabr(*child_aabr));
                     }
                 }
             }
@@ -302,11 +308,7 @@ impl<T: GetAabr, const M: usize> Node<T, M> {
     }
 }
 
-pub trait GetAabr {
-    fn get_aabr(&self) -> Aabr<f32>;
-}
-
-impl<T: GetAabr, const M: usize> RTree<T, M> {
+impl<T, const M: usize> RTree<T, M> {
     pub fn new() -> Self {
         Self {
             root: Node::Leaf(ArrayVec::new()),
@@ -321,15 +323,17 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
         self.len as usize
     }
 
-    pub fn insert(&mut self, data: T) {
+    pub fn insert(&mut self, data: T, data_aabr: Aabr<f32>) {
         assert!(M >= 2, "bad max node capacity");
 
         self.root.dbg_print();
 
-        if let InsertResult::Split(new_node) =
-            self.root
-                .insert(data, &mut self.internal_split_buf, &mut self.leaf_split_buf)
-        {
+        if let InsertResult::Split(new_node) = self.root.insert(
+            data,
+            data_aabr,
+            &mut self.internal_split_buf,
+            &mut self.leaf_split_buf,
+        ) {
             let root_aabr = self.root.bounds();
             let new_node_aabr = new_node.bounds();
 
@@ -350,7 +354,7 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
     pub fn retain(
         &mut self,
         mut collides: impl FnMut(Aabr<f32>) -> bool,
-        mut retain: impl FnMut(&mut T) -> bool,
+        mut retain: impl FnMut(&mut T, &mut Aabr<f32>) -> bool,
     ) {
         self.root
             .retain(None, &mut collides, &mut retain, &mut self.reinsert_buf);
@@ -364,8 +368,8 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
 
         let mut reinsert_buf = mem::replace(&mut self.reinsert_buf, Vec::new());
 
-        for data in reinsert_buf.drain(..) {
-            self.insert(data);
+        for (data, data_aabr) in reinsert_buf.drain(..) {
+            self.insert(data, data_aabr);
         }
 
         self.reinsert_buf = reinsert_buf;
@@ -373,7 +377,7 @@ impl<T: GetAabr, const M: usize> RTree<T, M> {
         // TODO: set len
     }
 
-    pub fn query(&self, mut collides: impl FnMut(Aabr<f32>) -> bool, mut callback: impl FnMut(&T)) {
+    pub fn query(&self, mut collides: impl FnMut(Aabr<f32>) -> bool, mut callback: impl FnMut(&T, Aabr<f32>)) {
         self.root.query(&mut collides, &mut callback)
     }
 
@@ -514,54 +518,46 @@ fn perimeter(aabr: Aabr<f32>) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use rand::Rng;
+    use vek::Vec2;
 
     use super::*;
 
-    #[derive(Clone, Copy)]
-    struct Data {
-        aabr: Aabr<f32>,
-        unique_id: u32,
-    }
+    fn insert_rand<const M: usize>(rtree: &mut RTree<u64, M>) -> (u64, Aabr<f32>) {
+        static NEXT_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
 
-    impl GetAabr for Data {
-        fn get_aabr(&self) -> Aabr<f32> {
-            self.aabr
-        }
+        let id = NEXT_UNIQUE_ID.fetch_add(1, Ordering::SeqCst);
+
+        let mut rng = rand::thread_rng();
+
+        let min = Vec2::new(rng.gen(), rng.gen());
+        let max = Vec2::new(
+            min.x + rng.gen_range(0.003..=0.01),
+            min.y + rng.gen_range(0.003..=0.01),
+        );
+
+        let aabr = Aabr { min, max };
+
+        rtree.insert(id, aabr);
+
+        (id, aabr)
     }
 
     #[test]
-    fn insert_delete_invariants() {
-        let mut rtree: RTree<Data, 8> = RTree::new();
-        let mut rng = rand::thread_rng();
-        let mut next_unique_id = 0;
-
-        let mut gen_data = || {
-            let min = Vec2::new(rng.gen(), rng.gen());
-            let max = Vec2::new(
-                min.x + rng.gen_range(0.003..=0.01),
-                min.y + rng.gen_range(0.003..=0.01),
-            );
-
-            next_unique_id += 1;
-            Data {
-                aabr: Aabr { min, max },
-                unique_id: next_unique_id,
-            }
-        };
+    fn insert_delete_interleaved() {
+        let mut rtree: RTree<u64, 8> = RTree::new();
 
         for _ in 0..10_000 {
-            let data_0 = gen_data();
-            let data_1 = gen_data();
-
-            rtree.insert(data_0);
-            rtree.insert(data_1);
+            let _ = insert_rand(&mut rtree);
+            let (id_1, aabr_1) = insert_rand(&mut rtree);
 
             let mut found = false;
             rtree.retain(
-                |aabr| aabr.collides_with_aabr(data_1.aabr),
-                |data| {
-                    if data.unique_id == data_1.unique_id {
+                |aabr| aabr.collides_with_aabr(aabr_1),
+                |&mut id, _| {
+                    if id == id_1 {
                         assert!(!found);
                         found = true;
                         false
