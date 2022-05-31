@@ -326,8 +326,6 @@ impl<T, const M: usize> RTree<T, M> {
     pub fn insert(&mut self, data: T, data_aabr: Aabr<f32>) {
         assert!(M >= 2, "bad max node capacity");
 
-        self.root.dbg_print();
-
         if let InsertResult::Split(new_node) = self.root.insert(
             data,
             data_aabr,
@@ -363,6 +361,8 @@ impl<T, const M: usize> RTree<T, M> {
             if children.len() == 1 {
                 let new_root = *children.drain(..).next().unwrap().0;
                 self.root = new_root;
+            } else if children.is_empty() {
+                self.root = Node::Leaf(ArrayVec::new());
             }
         }
 
@@ -372,12 +372,20 @@ impl<T, const M: usize> RTree<T, M> {
             self.insert(data, data_aabr);
         }
 
+        debug_assert!(self.reinsert_buf.capacity() == 0);
         self.reinsert_buf = reinsert_buf;
+
+        // Don't waste too much memory after a large restructuring.
+        self.reinsert_buf.shrink_to(M * 2);
 
         // TODO: set len
     }
 
-    pub fn query(&self, mut collides: impl FnMut(Aabr<f32>) -> bool, mut callback: impl FnMut(&T, Aabr<f32>)) {
+    pub fn query(
+        &self,
+        mut collides: impl FnMut(Aabr<f32>) -> bool,
+        mut callback: impl FnMut(&T, Aabr<f32>),
+    ) {
         self.root.query(&mut collides, &mut callback)
     }
 
@@ -518,6 +526,7 @@ fn perimeter(aabr: Aabr<f32>) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::TAU;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use rand::Rng;
@@ -549,15 +558,15 @@ mod tests {
     fn insert_delete_interleaved() {
         let mut rtree: RTree<u64, 8> = RTree::new();
 
-        for _ in 0..10_000 {
-            let _ = insert_rand(&mut rtree);
-            let (id_1, aabr_1) = insert_rand(&mut rtree);
+        for _ in 0..5_000 {
+            insert_rand(&mut rtree);
+            let (id_0, aabr_0) = insert_rand(&mut rtree);
 
             let mut found = false;
             rtree.retain(
-                |aabr| aabr.collides_with_aabr(aabr_1),
+                |aabr| aabr.collides_with_aabr(aabr_0),
                 |&mut id, _| {
-                    if id == id_1 {
+                    if id == id_0 {
                         assert!(!found);
                         found = true;
                         false
@@ -568,6 +577,46 @@ mod tests {
             );
             assert!(found);
 
+            rtree.check_invariants();
+        }
+    }
+
+    #[test]
+    fn node_underfill() {
+        let mut rtree: RTree<u64, 8> = RTree::new();
+
+        for _ in 0..5_000 {
+            insert_rand(&mut rtree);
+            rtree.check_invariants();
+        }
+
+        rtree.retain(|_| true, |_, _| false);
+        rtree.check_invariants();
+    }
+
+    #[test]
+    fn movement() {
+        let mut rtree: RTree<u64, 8> = RTree::new();
+
+        for _ in 0..10_000 {
+            insert_rand(&mut rtree);
+        }
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..100 {
+            rtree.retain(
+                |_| true,
+                |_, aabr| {
+                    let angle = rng.gen_range(0.0..TAU);
+                    let v = Vec2::new(angle.cos(), angle.sin()) * 0.3;
+
+                    aabr.min += v;
+                    aabr.max += v;
+                    assert!(aabr.is_valid());
+
+                    true
+                },
+            );
             rtree.check_invariants();
         }
     }
