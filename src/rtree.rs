@@ -278,9 +278,14 @@ impl<T, const M: usize> Node<T, M> {
     }
 
     #[cfg(test)]
-    fn check_invariants(&self, bounds: Option<Aabr<f32>>, depth: usize) -> usize {
+    fn check_invariants(
+        &self,
+        bounds: Option<Aabr<f32>>,
+        depth: usize,
+        len_counter: &mut usize,
+    ) -> usize {
         let mut child_depth = None;
-        
+
         match self {
             Node::Internal(children) => {
                 assert!(!children.is_empty());
@@ -289,7 +294,7 @@ impl<T, const M: usize> Node<T, M> {
                     if let Some(bounds) = bounds {
                         assert!(bounds.contains_aabr(*child_aabr));
                     }
-                    let d = child.check_invariants(Some(*child_aabr), depth + 1);
+                    let d = child.check_invariants(Some(*child_aabr), depth + 1, len_counter);
                     if let Some(child_depth) = &mut child_depth {
                         assert_eq!(*child_depth, d, "rtree is not balanced");
                     } else {
@@ -303,6 +308,7 @@ impl<T, const M: usize> Node<T, M> {
                         assert!(bounds.contains_aabr(*child_aabr));
                     }
                 }
+                *len_counter += children.len();
                 child_depth = Some(depth);
             }
         }
@@ -404,7 +410,7 @@ impl<T, const M: usize> RTree<T, M> {
     }
 
     #[cfg(test)]
-    fn check_invariants(&self) {
+    fn check_invariants(&self, expected_len: usize) {
         assert!(self.internal_split_buf.is_empty());
         assert!(self.leaf_split_buf.is_empty());
         assert!(self.reinsert_buf.is_empty());
@@ -417,7 +423,14 @@ impl<T, const M: usize> RTree<T, M> {
             assert!(!children.is_empty(), "empty internal root should be a leaf");
         }
 
-        self.root.check_invariants(None, 0);
+        let mut len_counter = 0;
+
+        self.root.check_invariants(None, 0, &mut len_counter);
+
+        assert_eq!(
+            len_counter, expected_len,
+            "unexpected number of entries in rtree"
+        )
     }
 }
 
@@ -561,7 +574,7 @@ mod tests {
     fn insert_delete_interleaved() {
         let mut rtree: RTree<u64, 8> = RTree::new();
 
-        for _ in 0..5_000 {
+        for i in 0..5_000 {
             insert_rand(&mut rtree);
             let (id_0, aabr_0) = insert_rand(&mut rtree);
 
@@ -580,7 +593,7 @@ mod tests {
             );
             assert!(found);
 
-            rtree.check_invariants();
+            rtree.check_invariants(i + 1);
         }
     }
 
@@ -588,13 +601,13 @@ mod tests {
     fn node_underfill() {
         let mut rtree: RTree<u64, 8> = RTree::new();
 
-        for _ in 0..5_000 {
+        for i in 0..5_000 {
             insert_rand(&mut rtree);
-            rtree.check_invariants();
+            rtree.check_invariants(i + 1);
         }
 
         rtree.retain(|_| true, |_, _| false);
-        rtree.check_invariants();
+        rtree.check_invariants(0);
     }
 
     #[test]
@@ -606,7 +619,7 @@ mod tests {
         }
 
         let mut rng = rand::thread_rng();
-        for _ in 0..100 {
+        for i in 0..100 {
             rtree.retain(
                 |_| true,
                 |_, aabr| {
@@ -620,7 +633,7 @@ mod tests {
                     true
                 },
             );
-            rtree.check_invariants();
+            rtree.check_invariants(10_000);
         }
     }
 }
