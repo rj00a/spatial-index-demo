@@ -18,6 +18,8 @@ use sdl2::video::{FullscreenType, Window, WindowContext};
 use sdl2::EventPump;
 use vek::{Aabr, Extent2, Vec2};
 
+use crate::rtree::QueryAction;
+
 struct State {
     canvas: Canvas<Window>,
     texture_creator: TextureCreator<WindowContext>,
@@ -275,7 +277,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 && state.objects[other_idx].aabr().collides_with_aabr(aabr)
                             {
                                 *c = true;
-                                // TODO: break early.
+                                QueryAction::Break
+                            } else {
+                                QueryAction::Continue
                             }
                         },
                     );

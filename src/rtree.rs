@@ -1,6 +1,3 @@
-// TODO: rename retain to query_mut
-// TODO: way to exit query and query_mut early.
-
 use std::mem;
 
 use approx::relative_eq;
@@ -14,6 +11,12 @@ pub struct RTree<T, const M: usize> {
     internal_split_buf: InternalBuf<T, M>,
     leaf_split_buf: LeafBuf<T>,
     reinsert_buf: LeafBuf<T>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QueryAction {
+    Continue,
+    Break,
 }
 
 type InternalBuf<T, const M: usize> = Vec<(Box<Node<T, M>>, Aabr<f32>)>;
@@ -111,24 +114,29 @@ impl<T, const M: usize> Node<T, M> {
     fn query(
         &self,
         collides: &mut impl FnMut(Aabr<f32>) -> bool,
-        callback: &mut impl FnMut(&T, Aabr<f32>),
-    ) {
+        callback: &mut impl FnMut(&T, Aabr<f32>) -> QueryAction,
+    ) -> QueryAction {
         match self {
             Node::Internal(children) => {
                 for child in children {
                     if collides(child.1) {
-                        child.0.query(collides, callback);
+                        if let QueryAction::Break = child.0.query(collides, callback) {
+                            return QueryAction::Break;
+                        }
                     }
                 }
             }
             Node::Leaf(children) => {
                 for (child, child_aabr) in children {
                     if collides(*child_aabr) {
-                        callback(child, *child_aabr);
+                        if let QueryAction::Break = callback(child, *child_aabr) {
+                            return QueryAction::Break;
+                        }
                     }
                 }
             }
         }
+        QueryAction::Continue
     }
 
     fn retain(
@@ -396,7 +404,7 @@ impl<T, const M: usize> RTree<T, M> {
     pub fn query(
         &self,
         mut collides: impl FnMut(Aabr<f32>) -> bool,
-        mut callback: impl FnMut(&T, Aabr<f32>),
+        mut callback: impl FnMut(&T, Aabr<f32>) -> QueryAction,
     ) {
         self.root.query(&mut collides, &mut callback);
     }
