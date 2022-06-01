@@ -1,5 +1,5 @@
-// TODO: improve insertion heuristic.
-// TODO: run clippy
+// TODO: rename retain to query_mut
+// TODO: way to exit query and query_mut early.
 
 use std::mem;
 
@@ -25,29 +25,25 @@ enum Node<T, const M: usize> {
 }
 
 impl<T, const M: usize> Node<T, M> {
-    fn is_internal(&self) -> bool {
-        match self {
-            Node::Internal(_) => true,
-            Node::Leaf(_) => false,
-        }
-    }
-
-    fn is_leaf(&self) -> bool {
-        !self.is_internal()
-    }
-
     fn bounds(&self) -> Aabr<f32> {
         match self {
             Node::Internal(children) => children
                 .iter()
                 .map(|(_, aabr)| *aabr)
-                .reduce(|l, r| l.union(r))
+                .reduce(Aabr::union)
                 .unwrap(),
             Node::Leaf(children) => children
                 .iter()
                 .map(|(_, aabr)| *aabr)
-                .reduce(|l, r| l.union(r))
+                .reduce(Aabr::union)
                 .unwrap(),
+        }
+    }
+
+    fn children_count(&self) -> usize {
+        match self {
+            Node::Internal(children) => children.len(),
+            Node::Leaf(children) => children.len(),
         }
     }
 
@@ -65,7 +61,7 @@ impl<T, const M: usize> Node<T, M> {
                 let (best_child, best_child_aabr) = children
                     .iter_mut()
                     .min_by_key(|(_, child_aabr)| {
-                        OrderedFloat(area(child_aabr.union(data_aabr)) - area(*child_aabr));
+                        OrderedFloat(area(child_aabr.union(data_aabr)) - area(*child_aabr))
                     })
                     .expect("internal node must have at least one child");
 
@@ -256,20 +252,24 @@ impl<T, const M: usize> Node<T, M> {
         }
     }
 
-    fn visit(&self, f: &mut impl FnMut(Aabr<f32>, usize), aabr: Option<Aabr<f32>>, level: usize) {
-        if let Some(aabr) = aabr {
-            f(aabr, level);
+    fn depth(&self, level: usize) -> usize {
+        match self {
+            Node::Internal(children) => children[0].0.depth(level + 1),
+            Node::Leaf(_) => level,
         }
+    }
 
+    fn visit(&self, f: &mut impl FnMut(Aabr<f32>, usize), level: usize) {
         match self {
             Node::Internal(children) => {
                 for (child, child_aabr) in children {
-                    child.visit(f, Some(*child_aabr), level + 1);
+                    child.visit(f, level + 1);
+                    f(*child_aabr, level);
                 }
             }
             Node::Leaf(children) => {
                 for (_, child_aabr) in children {
-                    f(*child_aabr, level + 1);
+                    f(*child_aabr, level);
                 }
             }
         }
@@ -327,13 +327,6 @@ impl<T, const M: usize> Node<T, M> {
 
         child_depth.unwrap()
     }
-
-    fn dbg_print(&self) {
-        match self {
-            Node::Internal(children) => eprintln!("Internal, #children = {}", children.len()),
-            Node::Leaf(children) => eprintln!("Leaf, #children = {}", children.len()),
-        }
-    }
 }
 
 impl<T, const M: usize> RTree<T, M> {
@@ -387,7 +380,7 @@ impl<T, const M: usize> RTree<T, M> {
             }
         }
 
-        let mut reinsert_buf = mem::replace(&mut self.reinsert_buf, Vec::new());
+        let mut reinsert_buf = mem::take(&mut self.reinsert_buf);
 
         for (data, data_aabr) in reinsert_buf.drain(..) {
             self.insert(data, data_aabr);
@@ -405,16 +398,23 @@ impl<T, const M: usize> RTree<T, M> {
         mut collides: impl FnMut(Aabr<f32>) -> bool,
         mut callback: impl FnMut(&T, Aabr<f32>),
     ) {
-        self.root.query(&mut collides, &mut callback)
+        self.root.query(&mut collides, &mut callback);
     }
 
     pub fn clear(&mut self) {
         self.root = Node::Leaf(ArrayVec::new());
     }
 
-    /// For the purposes of rendering the RTree.
+    pub fn depth(&self) -> usize {
+        self.root.depth(0)
+    }
+
+    /// For the purposes of rendering the R-Tree.
     pub fn visit(&self, mut f: impl FnMut(Aabr<f32>, usize)) {
-        self.root.visit(&mut f, None, 0);
+        self.root.visit(&mut f, 1);
+        if self.root.children_count() != 0 {
+            f(self.root.bounds(), 0);
+        }
     }
 
     #[cfg(test)]
@@ -474,7 +474,7 @@ fn split_node<T, const M: usize>(
 
     let groups = (M / 2)..=(M / 2) + M % 2 + 1;
 
-    let bb = |es: &[T]| es.iter().map(&get_aabr).reduce(|l, r| l.union(r)).unwrap();
+    let bb = |es: &[T]| es.iter().map(&get_aabr).reduce(Aabr::union).unwrap();
 
     let mut sum_x = 0.0;
     split_buf.sort_unstable_by_key(|e| {
@@ -510,7 +510,7 @@ fn split_node<T, const M: usize>(
     let mut best_dist = 0;
     let mut best_overlap_value = f32::INFINITY;
 
-    for cnt in groups.clone() {
+    for cnt in groups {
         let group_1 = bb(&split_buf[..cnt]);
         let group_2 = bb(&split_buf[cnt..]);
         let overlap_value = area(group_1.intersection(group_2));
