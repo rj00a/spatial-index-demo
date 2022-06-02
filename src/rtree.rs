@@ -27,6 +27,119 @@ enum Node<T, const M: usize> {
     Leaf(ArrayVec<(T, Aabr<f32>), M>),
 }
 
+impl<T, const M: usize> RTree<T, M> {
+    pub fn new() -> Self {
+        Self {
+            root: Node::Leaf(ArrayVec::new()),
+            internal_split_buf: Vec::new(),
+            leaf_split_buf: Vec::new(),
+            reinsert_buf: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, data: T, data_aabr: Aabr<f32>) {
+        assert!(M >= 2, "bad max node capacity");
+
+        if let InsertResult::Split(new_node) = self.root.insert(
+            data,
+            data_aabr,
+            &mut self.internal_split_buf,
+            &mut self.leaf_split_buf,
+        ) {
+            let root_aabr = self.root.bounds();
+            let new_node_aabr = new_node.bounds();
+
+            let old_root = mem::replace(&mut self.root, Node::Internal(ArrayVec::new()));
+
+            match &mut self.root {
+                Node::Internal(children) => {
+                    children.push((Box::new(old_root), root_aabr));
+                    children.push((new_node, new_node_aabr));
+                }
+                Node::Leaf(_) => unreachable!(),
+            }
+        }
+    }
+
+    pub fn retain(
+        &mut self,
+        mut collides: impl FnMut(Aabr<f32>) -> bool,
+        mut retain: impl FnMut(&mut T, &mut Aabr<f32>) -> bool,
+    ) {
+        self.root
+            .retain(None, &mut collides, &mut retain, &mut self.reinsert_buf);
+
+        if let Node::Internal(children) = &mut self.root {
+            if children.len() == 1 {
+                let new_root = *children.drain(..).next().unwrap().0;
+                self.root = new_root;
+            } else if children.is_empty() {
+                self.root = Node::Leaf(ArrayVec::new());
+            }
+        }
+
+        let mut reinsert_buf = mem::take(&mut self.reinsert_buf);
+
+        for (data, data_aabr) in reinsert_buf.drain(..) {
+            self.insert(data, data_aabr);
+        }
+
+        debug_assert!(self.reinsert_buf.capacity() == 0);
+        self.reinsert_buf = reinsert_buf;
+
+        // Don't waste too much memory after a large restructuring.
+        self.reinsert_buf.shrink_to(M * 2);
+    }
+
+    pub fn query(
+        &self,
+        mut collides: impl FnMut(Aabr<f32>) -> bool,
+        mut callback: impl FnMut(&T, Aabr<f32>) -> QueryAction,
+    ) {
+        self.root.query(&mut collides, &mut callback);
+    }
+
+    pub fn clear(&mut self) {
+        self.root = Node::Leaf(ArrayVec::new());
+    }
+
+    pub fn depth(&self) -> usize {
+        self.root.depth(0)
+    }
+
+    /// For the purposes of rendering the R-Tree.
+    pub fn visit(&self, mut f: impl FnMut(Aabr<f32>, usize)) {
+        self.root.visit(&mut f, 1);
+        if self.root.children_count() != 0 {
+            f(self.root.bounds(), 0);
+        }
+    }
+
+    #[cfg(test)]
+    fn check_invariants(&self, expected_len: usize) {
+        assert!(self.internal_split_buf.is_empty());
+        assert!(self.leaf_split_buf.is_empty());
+        assert!(self.reinsert_buf.is_empty());
+
+        if let Node::Internal(children) = &self.root {
+            assert!(
+                children.len() != 1,
+                "internal root with a single entry should become the child"
+            );
+            assert!(!children.is_empty(), "empty internal root should be a leaf");
+        }
+
+        let mut len_counter = 0;
+
+        self.root.check_invariants(None, 0, &mut len_counter);
+
+        assert_eq!(
+            len_counter, expected_len,
+            "unexpected number of entries in rtree"
+        )
+    }
+}
+
 impl<T, const M: usize> Node<T, M> {
     fn bounds(&self) -> Aabr<f32> {
         match self {
@@ -61,12 +174,63 @@ impl<T, const M: usize> Node<T, M> {
             Self::Internal(children) => {
                 let children_is_full = children.is_full();
 
+                // Area-value heruristic
                 let (best_child, best_child_aabr) = children
                     .iter_mut()
                     .min_by_key(|(_, child_aabr)| {
                         OrderedFloat(area(child_aabr.union(data_aabr)) - area(*child_aabr))
                     })
                     .expect("internal node must have at least one child");
+
+                // Overlap-value heuristic
+                /*
+                debug_assert!(
+                    !children.is_empty(),
+                    "internal node must have at least one child"
+                );
+
+                let mut best = 0;
+                let mut best_aabr = Aabr::default();
+                let mut best_overlap_value = f32::INFINITY;
+
+                for (idx, (_, aabr)) in children.iter().enumerate() {
+                    let mut base_overlap = 0.0;
+                    let mut union_overlap = 0.0;
+                    for (other_idx, (_, other_aabr)) in children.iter().enumerate() {
+                        if other_idx != idx {
+                            let int = aabr.intersection(*other_aabr);
+                            if int.is_valid() {
+                                base_overlap += area(int);
+                            }
+
+                            let int = aabr.union(data_aabr).intersection(*other_aabr);
+                            if int.is_valid() {
+                                union_overlap += area(int);
+                            }
+                        }
+                    }
+
+                    // The increase in overlap value
+                    let overlap_value = union_overlap - base_overlap;
+                    debug_assert!(overlap_value >= 0.0);
+
+                    if overlap_value < best_overlap_value {
+                        best = idx;
+                        best_aabr = *aabr;
+                        best_overlap_value = overlap_value;
+                    } else if overlap_value == best_overlap_value {
+                        let area_value = area(aabr.union(data_aabr)) - area(*aabr);
+                        let best_area_value = area(best_aabr.union(data_aabr)) - area(best_aabr);
+
+                        if area_value < best_area_value {
+                            best = idx;
+                            best_aabr = *aabr;
+                        }
+                    }
+                }
+
+                let (best_child, best_child_aabr) = &mut children[best];
+                */
 
                 match best_child.insert(data, data_aabr, internal_split_buf, leaf_split_buf) {
                     InsertResult::Ok => {
@@ -336,120 +500,6 @@ impl<T, const M: usize> Node<T, M> {
         child_depth.unwrap()
     }
 }
-
-impl<T, const M: usize> RTree<T, M> {
-    pub fn new() -> Self {
-        Self {
-            root: Node::Leaf(ArrayVec::new()),
-            internal_split_buf: Vec::new(),
-            leaf_split_buf: Vec::new(),
-            reinsert_buf: Vec::new(),
-        }
-    }
-
-    pub fn insert(&mut self, data: T, data_aabr: Aabr<f32>) {
-        assert!(M >= 2, "bad max node capacity");
-
-        if let InsertResult::Split(new_node) = self.root.insert(
-            data,
-            data_aabr,
-            &mut self.internal_split_buf,
-            &mut self.leaf_split_buf,
-        ) {
-            let root_aabr = self.root.bounds();
-            let new_node_aabr = new_node.bounds();
-
-            let old_root = mem::replace(&mut self.root, Node::Internal(ArrayVec::new()));
-
-            match &mut self.root {
-                Node::Internal(children) => {
-                    children.push((Box::new(old_root), root_aabr));
-                    children.push((new_node, new_node_aabr));
-                }
-                Node::Leaf(_) => unreachable!(),
-            }
-        }
-    }
-
-    pub fn retain(
-        &mut self,
-        mut collides: impl FnMut(Aabr<f32>) -> bool,
-        mut retain: impl FnMut(&mut T, &mut Aabr<f32>) -> bool,
-    ) {
-        self.root
-            .retain(None, &mut collides, &mut retain, &mut self.reinsert_buf);
-
-        if let Node::Internal(children) = &mut self.root {
-            if children.len() == 1 {
-                let new_root = *children.drain(..).next().unwrap().0;
-                self.root = new_root;
-            } else if children.is_empty() {
-                self.root = Node::Leaf(ArrayVec::new());
-            }
-        }
-
-        let mut reinsert_buf = mem::take(&mut self.reinsert_buf);
-
-        for (data, data_aabr) in reinsert_buf.drain(..) {
-            self.insert(data, data_aabr);
-        }
-
-        debug_assert!(self.reinsert_buf.capacity() == 0);
-        self.reinsert_buf = reinsert_buf;
-
-        // Don't waste too much memory after a large restructuring.
-        self.reinsert_buf.shrink_to(M * 2);
-    }
-
-    pub fn query(
-        &self,
-        mut collides: impl FnMut(Aabr<f32>) -> bool,
-        mut callback: impl FnMut(&T, Aabr<f32>) -> QueryAction,
-    ) {
-        self.root.query(&mut collides, &mut callback);
-    }
-
-    pub fn clear(&mut self) {
-        self.root = Node::Leaf(ArrayVec::new());
-    }
-
-    pub fn depth(&self) -> usize {
-        self.root.depth(0)
-    }
-
-    /// For the purposes of rendering the R-Tree.
-    pub fn visit(&self, mut f: impl FnMut(Aabr<f32>, usize)) {
-        self.root.visit(&mut f, 1);
-        if self.root.children_count() != 0 {
-            f(self.root.bounds(), 0);
-        }
-    }
-
-    #[cfg(test)]
-    fn check_invariants(&self, expected_len: usize) {
-        assert!(self.internal_split_buf.is_empty());
-        assert!(self.leaf_split_buf.is_empty());
-        assert!(self.reinsert_buf.is_empty());
-
-        if let Node::Internal(children) = &self.root {
-            assert!(
-                children.len() != 1,
-                "internal root with a single entry should become the child"
-            );
-            assert!(!children.is_empty(), "empty internal root should be a leaf");
-        }
-
-        let mut len_counter = 0;
-
-        self.root.check_invariants(None, 0, &mut len_counter);
-
-        assert_eq!(
-            len_counter, expected_len,
-            "unexpected number of entries in rtree"
-        )
-    }
-}
-
 enum InsertResult<T, const M: usize> {
     /// No split occurred.
     Ok,
@@ -645,7 +695,7 @@ mod tests {
     fn movement() {
         let mut rtree: RTree<u64, 8> = RTree::new();
 
-        for _ in 0..10_000 {
+        for _ in 0..5_000 {
             insert_rand(&mut rtree);
         }
 
@@ -664,7 +714,7 @@ mod tests {
                     true
                 },
             );
-            rtree.check_invariants(10_000);
+            rtree.check_invariants(5_000);
         }
     }
 }

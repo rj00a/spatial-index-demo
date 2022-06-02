@@ -30,11 +30,17 @@ struct State {
     pressing_e: bool,
     pressing_r: bool,
     pressing_t: bool,
+    pressing_y: bool,
     pause_time: bool,
     enable_rtree: bool,
     render_rtree: bool,
+    render_objects: bool,
     rtree: RTree<usize, 8>,
-    frame_time: f64,
+    target_fps: f64,
+    displayed_fps: f64,
+    last_fps_update: Instant,
+    fps_sample_sum: f64,
+    fps_sample_count: usize,
     objects: Vec<Object>,
     colliding_buf: Vec<bool>,
 }
@@ -99,22 +105,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         pressing_e: false,
         pressing_r: false,
         pressing_t: false,
+        pressing_y: false,
         pause_time: false,
         enable_rtree: true,
         render_rtree: true,
+        render_objects: true,
         rtree: RTree::new(),
-        frame_time: 0.0,
+        target_fps: 144.0,
+        displayed_fps: 144.0,
+        last_fps_update: Instant::now(),
+        fps_sample_sum: 0.0,
+        fps_sample_count: 0,
         objects: Vec::new(),
         colliding_buf: Vec::new(),
     };
 
-    let target_fps = 144.0_f32;
-
     loop {
         let start = Instant::now();
-
-        state.canvas.set_draw_color(Color::WHITE);
-        state.canvas.clear();
 
         for event in state.event_pump.poll_iter() {
             match event {
@@ -170,6 +177,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             state.rtree.clear();
                         }
                     }
+                    Keycode::Y if !state.pressing_y => {
+                        state.pressing_y = true;
+                        state.render_objects = !state.render_objects;
+                    }
                     _ => {}
                 },
                 Event::KeyUp {
@@ -180,6 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Keycode::E => state.pressing_e = false,
                     Keycode::R => state.pressing_r = false,
                     Keycode::T => state.pressing_t = false,
+                    Keycode::Y => state.pressing_y = false,
                     _ => {}
                 },
                 _ => {}
@@ -229,7 +241,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.colliding_buf.push(false);
         }
 
-        let delta = target_fps.recip() * !state.pause_time as u8 as f32;
+        let delta = state.target_fps.recip() as f32 * !state.pause_time as u8 as f32;
 
         for obj in state.objects.iter_mut() {
             obj.pos += obj.velocity * delta;
@@ -244,6 +256,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 obj.velocity.y *= -1.0;
             }
         }
+
+        let start_retain = Instant::now();
 
         if state.enable_rtree {
             state.rtree.retain(
@@ -260,6 +274,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         state.colliding_buf.clear();
         state.colliding_buf.resize(state.objects.len(), false);
+
+        let start_query = Instant::now();
 
         state
             .colliding_buf
@@ -293,25 +309,64 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             });
 
+        let done_query = Instant::now();
+
         assert_eq!(state.objects.len(), state.colliding_buf.len());
 
+        render(&mut state, &font)?;
+
+        let now = Instant::now();
+        let elapsed = now.duration_since(start);
+
+        if now - state.last_fps_update > Duration::from_secs_f64(0.5) {
+            state.last_fps_update = now;
+            state.displayed_fps = state.fps_sample_sum / state.fps_sample_count as f64;
+            state.fps_sample_sum = 0.0;
+            state.fps_sample_count = 0;
+
+            let retain_duration = start_query - start_retain;
+            let query_duration = done_query - start_query;
+
+            let retain_fraction = retain_duration.as_secs_f64() / elapsed.as_secs_f64();
+            let query_fraction = query_duration.as_secs_f64() / elapsed.as_secs_f64();
+
+            println!(
+                "FPS: {:.2}, retain: {:.2}%, query: {:.2}%",
+                state.displayed_fps,
+                retain_fraction * 100.0,
+                query_fraction * 100.0,
+            );
+        }
+
+        state.fps_sample_sum += elapsed.as_secs_f64().recip();
+        state.fps_sample_count += 1;
+
+        thread::sleep(Duration::from_secs_f64(state.target_fps.recip()).saturating_sub(elapsed));
+    }
+}
+
+fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
+    state.canvas.set_draw_color(Color::WHITE);
+    state.canvas.clear();
+
+    if state.render_objects {
         for (obj, &collides) in state.objects.iter().zip(&state.colliding_buf) {
             let top_left_pixel = pos_to_pixel(
                 state.window_dims,
-                Vec2::new(obj.pos.x - obj.dims.w / 2.0, obj.pos.y + obj.dims.h / 2.0),
-            );
-
+                Vec2::new(obj.pos.x - obj.dims.w / 2.0, obj.pos.y + obj.dims.h /
+        2.0),     );
+    
             let bottom_right_pixel = pos_to_pixel(
                 state.window_dims,
-                Vec2::new(obj.pos.x + obj.dims.w / 2.0, obj.pos.y - obj.dims.h / 2.0),
-            );
-
+                Vec2::new(obj.pos.x + obj.dims.w / 2.0, obj.pos.y - obj.dims.h /
+        2.0),     );
+    
             let color = if collides {
                 Color::RGBA(255, 0, 0, 128)
             } else {
                 Color::RGBA(0, 0, 0, 128)
             };
-
+    
             state.canvas.set_draw_color(color);
             state.canvas.fill_rect(Rect::new(
                 top_left_pixel.x,
@@ -320,69 +375,65 @@ fn main() -> Result<(), Box<dyn Error>> {
                 bottom_right_pixel.y.abs_diff(top_left_pixel.y),
             ))?;
         }
-
-        let level_colors = [Color::BLUE, Color::GREEN, Color::MAGENTA, Color::RED];
-
-        let depth = state.rtree.depth();
-
-        if state.enable_rtree && state.render_rtree {
-            state.rtree.visit(|aabr, level| {
-                let color = level_colors[(depth + 1 - level) % level_colors.len()];
-                let min = pos_to_pixel(state.window_dims, aabr.min);
-                let max = pos_to_pixel(state.window_dims, aabr.max);
-
-                let _ = state.canvas.set_draw_color(color);
-                let _ = state.canvas.draw_rect(Rect::new(
-                    min.x,
-                    max.y,
-                    min.x.abs_diff(max.x),
-                    min.y.abs_diff(max.y),
-                ));
-            });
-        }
-
-        let object_count = state.objects.len();
-
-        render_text(
-            &mut state,
-            &font,
-            Color::BLACK,
-            &format!("Objects: {object_count}"),
-            (5, 0),
-        )?;
-
-        let frame_time = state.frame_time as f32;
-
-        let frame_time_color = if frame_time > target_fps.recip() {
-            Color::RED
-        } else {
-            Color::BLACK
-        };
-
-        render_text(
-            &mut state,
-            &font,
-            frame_time_color,
-            &format!("Frame Time: {:.2} FPS", frame_time.recip()),
-            (5, 20),
-        )?;
-
-        let (rtree_text_color, rtree_text) = if state.enable_rtree {
-            (Color::BLACK, "R-Tree: Enabled")
-        } else {
-            (Color::RED, "R-Tree: Disabled")
-        };
-
-        render_text(&mut state, &font, rtree_text_color, rtree_text, (5, 40))?;
-
-        state.canvas.present();
-
-        let elapsed = Instant::now().duration_since(start);
-
-        state.frame_time = elapsed.as_secs_f64();
-
-        thread::sleep(Duration::from_secs_f32(target_fps.recip()).saturating_sub(elapsed));
     }
+
+    let level_colors = [Color::BLUE, Color::GREEN, Color::MAGENTA, Color::RED];
+
+    let depth = state.rtree.depth();
+
+    if state.enable_rtree && state.render_rtree {
+        state.rtree.visit(|aabr, level| {
+            let color = level_colors[(depth + 1 - level) % level_colors.len()];
+            let min = pos_to_pixel(state.window_dims, aabr.min);
+            let max = pos_to_pixel(state.window_dims, aabr.max);
+
+            let _ = state.canvas.set_draw_color(color);
+            let _ = state.canvas.draw_rect(Rect::new(
+                min.x,
+                max.y,
+                min.x.abs_diff(max.x),
+                min.y.abs_diff(max.y),
+            ));
+        });
+    }
+
+    let object_count = state.objects.len();
+
+    render_text(
+        state,
+        &font,
+        Color::BLACK,
+        &format!("Objects: {object_count}"),
+        (5, 0),
+    )?;
+
+    let avg_fps = state.displayed_fps;
+
+    let fps_color = if avg_fps < state.target_fps {
+        Color::RGB(217, 20, 20)
+    } else {
+        Color::BLACK
+    };
+
+    render_text(
+        state,
+        &font,
+        fps_color,
+        &format!("FPS: {:.2}", avg_fps),
+        (5, 20),
+    )?;
+
+    let (rtree_text_color, rtree_text) = if state.enable_rtree {
+        (Color::BLACK, "R-Tree: Enabled")
+    } else {
+        (Color::RGB(217, 20, 20), "R-Tree: Disabled")
+    };
+
+    render_text(state, &font, rtree_text_color, rtree_text, (5, 40))?;
+
+    state.canvas.present();
+
+    Ok(())
 }
 
 /// Screen space to world space.
