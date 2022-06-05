@@ -1,3 +1,5 @@
+https://user-images.githubusercontent.com/31678482/172040388-4710d5d3-1756-451f-b7ff-d2a8c5ae6fe0.mp4
+
 # Dynamic R-Tree Demo
 
 This repo contains an implementation of an in-memory [R-Tree](https://en.wikipedia.org/wiki/R-tree) (specifically an [R*-Tree](https://en.wikipedia.org/wiki/R*-tree)). This is used for fast spatial queries such as "Find the nearest McDonalds." or "Find all entities that collide with this bounding box." or "Find all geometry that intersects with this ray."
