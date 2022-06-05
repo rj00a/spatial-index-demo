@@ -14,13 +14,15 @@ In this demo, objects turn red when they intersect with another object. Without 
 
 ## Why not use a grid?
 
-For a situation as simple as this, a grid-based spatial partition would probably work fine. However, grids don't work well when there is a large discrepancy in the size and density of objects in the scene (see the "teapot in a stadium" problem).
+For a situation as simple as this, a grid-based spatial partition would probably work fine. However, grids don't work well when there is a large discrepancy in the size and density of objects in the scene (see the "teapot in a stadium" problem). Additionally, grids can use a lot of memory if the scene is large.
 
 # Conclusion
 
 With the R-Tree enabled, I was able to reach over 80,000 objects loaded simultaneously before the framerate dipped below 144 FPS on my machine.
 
 To improve performance further, the `retain` function could be parallelized or a bulk-insert routine could be created, since entries are reinserted individually at the end of the `retain` function.
+
+This implementation only supports two dimensions for the sake of clarity. However, a generalization to higher dimensions should be fairly straightforward.
 
 # Controls
 * **W**: Spawn objects
