@@ -1,14 +1,15 @@
 use std::mem;
 
+#[cfg(test)]
 use approx::relative_eq;
 use arrayvec::ArrayVec;
 use ordered_float::OrderedFloat;
 use vek::Aabr;
 
-pub struct RTree<T, const M: usize> {
-    root: Node<T, M>,
+pub struct RTree<T, const MIN: usize, const MAX: usize> {
+    root: Node<T, MIN, MAX>,
     // The bufs are put here to reuse their allocations.
-    internal_split_buf: InternalBuf<T, M>,
+    internal_split_buf: InternalBuf<T, MIN, MAX>,
     leaf_split_buf: LeafBuf<T>,
     reinsert_buf: LeafBuf<T>,
 }
@@ -19,16 +20,21 @@ pub enum QueryAction {
     Break,
 }
 
-type InternalBuf<T, const M: usize> = Vec<(Box<Node<T, M>>, Aabr<f32>)>;
+type InternalBuf<T, const MIN: usize, const MAX: usize> = Vec<(Box<Node<T, MIN, MAX>>, Aabr<f32>)>;
 type LeafBuf<T> = Vec<(T, Aabr<f32>)>;
 
-enum Node<T, const M: usize> {
-    Internal(ArrayVec<(Box<Node<T, M>>, Aabr<f32>), M>),
-    Leaf(ArrayVec<(T, Aabr<f32>), M>),
+enum Node<T, const MIN: usize, const MAX: usize> {
+    Internal(ArrayVec<(Box<Node<T, MIN, MAX>>, Aabr<f32>), MAX>),
+    Leaf(ArrayVec<(T, Aabr<f32>), MAX>),
 }
 
-impl<T, const M: usize> RTree<T, M> {
+impl<T, const MIN: usize, const MAX: usize> RTree<T, MIN, MAX> {
     pub fn new() -> Self {
+        assert!(
+            MIN >= 2 && MIN <= MAX / 2 && MAX >= 2,
+            "invalid R-Tree configuration"
+        );
+
         Self {
             root: Node::Leaf(ArrayVec::new()),
             internal_split_buf: Vec::new(),
@@ -38,8 +44,6 @@ impl<T, const M: usize> RTree<T, M> {
     }
 
     pub fn insert(&mut self, data: T, data_aabr: Aabr<f32>) {
-        assert!(M >= 2, "bad max node capacity");
-
         if let InsertResult::Split(new_node) = self.root.insert(
             data,
             data_aabr,
@@ -88,7 +92,7 @@ impl<T, const M: usize> RTree<T, M> {
         self.reinsert_buf = reinsert_buf;
 
         // Don't waste too much memory after a large restructuring.
-        self.reinsert_buf.shrink_to(M * 2);
+        self.reinsert_buf.shrink_to(16);
     }
 
     pub fn query(
@@ -140,7 +144,7 @@ impl<T, const M: usize> RTree<T, M> {
     }
 }
 
-impl<T, const M: usize> Node<T, M> {
+impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
     fn bounds(&self) -> Aabr<f32> {
         match self {
             Node::Internal(children) => children
@@ -167,70 +171,17 @@ impl<T, const M: usize> Node<T, M> {
         &mut self,
         data: T,
         data_aabr: Aabr<f32>,
-        internal_split_buf: &mut InternalBuf<T, M>,
+        internal_split_buf: &mut InternalBuf<T, MIN, MAX>,
         leaf_split_buf: &mut LeafBuf<T>,
-    ) -> InsertResult<T, M> {
+    ) -> InsertResult<T, MIN, MAX> {
         match self {
             Self::Internal(children) => {
                 let children_is_full = children.is_full();
 
-                // Area-value heruristic
-                let (best_child, best_child_aabr) = children
-                    .iter_mut()
-                    .min_by_key(|(_, child_aabr)| {
-                        OrderedFloat(area(child_aabr.union(data_aabr)) - area(*child_aabr))
-                    })
-                    .expect("internal node must have at least one child");
-
-                // Overlap-value heuristic
-                /*
-                debug_assert!(
-                    !children.is_empty(),
-                    "internal node must have at least one child"
-                );
-
-                let mut best = 0;
-                let mut best_aabr = Aabr::default();
-                let mut best_overlap_value = f32::INFINITY;
-
-                for (idx, (_, aabr)) in children.iter().enumerate() {
-                    let mut base_overlap = 0.0;
-                    let mut union_overlap = 0.0;
-                    for (other_idx, (_, other_aabr)) in children.iter().enumerate() {
-                        if other_idx != idx {
-                            let int = aabr.intersection(*other_aabr);
-                            if int.is_valid() {
-                                base_overlap += area(int);
-                            }
-
-                            let int = aabr.union(data_aabr).intersection(*other_aabr);
-                            if int.is_valid() {
-                                union_overlap += area(int);
-                            }
-                        }
-                    }
-
-                    // The increase in overlap value
-                    let overlap_value = union_overlap - base_overlap;
-                    debug_assert!(overlap_value >= 0.0);
-
-                    if overlap_value < best_overlap_value {
-                        best = idx;
-                        best_aabr = *aabr;
-                        best_overlap_value = overlap_value;
-                    } else if overlap_value == best_overlap_value {
-                        let area_value = area(aabr.union(data_aabr)) - area(*aabr);
-                        let best_area_value = area(best_aabr.union(data_aabr)) - area(best_aabr);
-
-                        if area_value < best_area_value {
-                            best = idx;
-                            best_aabr = *aabr;
-                        }
-                    }
-                }
-
-                let (best_child, best_child_aabr) = &mut children[best];
-                */
+                let (best_child, best_child_aabr) = {
+                    let best = area_insertion_heuristic(data_aabr, children);
+                    &mut children[best]
+                };
 
                 match best_child.insert(data, data_aabr, internal_split_buf, leaf_split_buf) {
                     InsertResult::Ok => {
@@ -242,7 +193,7 @@ impl<T, const M: usize> Node<T, M> {
                         *best_child_aabr = best_child.bounds();
 
                         if children_is_full {
-                            let other = split_node(
+                            let other = split_node::<_, _, MIN, MAX>(
                                 internal_split_buf,
                                 children,
                                 (new_node, new_node_aabr),
@@ -258,13 +209,13 @@ impl<T, const M: usize> Node<T, M> {
             }
             Self::Leaf(children) => {
                 if children.is_full() {
-                    let other = split_node(
+                    let other = split_node::<_, _, MIN, MAX>(
                         leaf_split_buf,
                         children,
                         (data, data_aabr),
                         |(_, data_aabr)| *data_aabr,
                     );
-                    debug_assert!(other.len() >= M / 2);
+                    debug_assert!(other.len() >= MIN);
 
                     InsertResult::Split(Box::new(Node::Leaf(other)))
                 } else {
@@ -334,7 +285,7 @@ impl<T, const M: usize> Node<T, M> {
                 });
 
                 if let Some(bounds) = bounds {
-                    if children.len() < M / 2 {
+                    if children.len() < MIN {
                         for (child, _) in children.drain(..) {
                             child.collect_orphans(reinsert_buf);
                         }
@@ -391,7 +342,7 @@ impl<T, const M: usize> Node<T, M> {
                 }
 
                 if let Some(bounds) = bounds {
-                    if children.len() < M / 2 {
+                    if children.len() < MIN {
                         reinsert_buf.extend(children.drain(..));
                         RetainResult::Deleted
                     } else if recalculate_bounds {
@@ -500,11 +451,11 @@ impl<T, const M: usize> Node<T, M> {
         child_depth.unwrap()
     }
 }
-enum InsertResult<T, const M: usize> {
+enum InsertResult<T, const MIN: usize, const MAX: usize> {
     /// No split occurred.
     Ok,
     /// Contains the new node that was split off.
-    Split(Box<Node<T, M>>),
+    Split(Box<Node<T, MIN, MAX>>),
 }
 
 enum RetainResult {
@@ -517,20 +468,97 @@ enum RetainResult {
     ShrunkAabr(Aabr<f32>),
 }
 
+fn area_insertion_heuristic<T>(data_aabr: Aabr<f32>, children: &[(T, Aabr<f32>)]) -> usize {
+    debug_assert!(
+        !children.is_empty(),
+        "internal node must have at least one child"
+    );
+
+    let mut best = 0;
+    let mut best_area_increase = f32::INFINITY;
+    let mut best_aabr = Aabr::default();
+
+    for (idx, (_, child_aabr)) in children.iter().enumerate() {
+        let area_increase = area(child_aabr.union(data_aabr)) - area(*child_aabr);
+        if area_increase < best_area_increase {
+            best = idx;
+            best_area_increase = area_increase;
+            best_aabr = *child_aabr;
+        } else if area_increase == best_area_increase && area(*child_aabr) < area(best_aabr) {
+            best = idx;
+            best_aabr = *child_aabr;
+        }
+    }
+
+    best
+}
+
+/// This heuristic produces better trees than the area heuristic, but at a
+/// greater insertion cost.
+#[allow(unused)]
+fn overlap_insertion_heuristic<T>(data_aabr: Aabr<f32>, children: &[(T, Aabr<f32>)]) -> usize {
+    debug_assert!(
+        !children.is_empty(),
+        "internal node must have at least one child"
+    );
+
+    let mut best = 0;
+    let mut best_aabr = Aabr::default();
+    let mut best_overlap_value = f32::INFINITY;
+
+    for (idx, (_, aabr)) in children.iter().enumerate() {
+        let mut base_overlap = 0.0;
+        let mut union_overlap = 0.0;
+        for (other_idx, (_, other_aabr)) in children.iter().enumerate() {
+            if other_idx != idx {
+                let int = aabr.intersection(*other_aabr);
+                if int.is_valid() {
+                    base_overlap += area(int);
+                }
+
+                let int = aabr.union(data_aabr).intersection(*other_aabr);
+                if int.is_valid() {
+                    union_overlap += area(int);
+                }
+            }
+        }
+
+        // The increase in overlap value
+        let overlap_value = union_overlap - base_overlap;
+        debug_assert!(overlap_value >= 0.0);
+
+        if overlap_value < best_overlap_value {
+            best = idx;
+            best_aabr = *aabr;
+            best_overlap_value = overlap_value;
+        } else if overlap_value == best_overlap_value {
+            let area_value = area(aabr.union(data_aabr)) - area(*aabr);
+            let best_area_value = area(best_aabr.union(data_aabr)) - area(best_aabr);
+
+            if area_value < best_area_value {
+                best = idx;
+                best_aabr = *aabr;
+            }
+        }
+    }
+
+    best
+}
+
 /// Splits a node with `children` being the children of the node being split.
 ///
 /// After returning, `children` contains half the data while the returned
 /// `ArrayVec` contains the other half for the new node.
-fn split_node<T, const M: usize>(
+fn split_node<T, F: Fn(&T) -> Aabr<f32>, const MIN: usize, const MAX: usize>(
     split_buf: &mut Vec<T>,
-    children: &mut ArrayVec<T, M>,
+    children: &mut ArrayVec<T, MAX>,
     data: T,
-    get_aabr: impl Fn(&T) -> Aabr<f32>,
-) -> ArrayVec<T, M> {
+    get_aabr: F,
+) -> ArrayVec<T, MAX> {
     split_buf.extend(children.take());
     split_buf.push(data);
 
-    let groups = (M / 2)..=(M / 2) + M % 2 + 1;
+    let dists = MIN..MAX - MIN + 2;
 
     let bb = |es: &[T]| es.iter().map(&get_aabr).reduce(Aabr::union).unwrap();
 
@@ -540,8 +568,8 @@ fn split_node<T, const M: usize>(
         OrderedFloat(aabr.min.x / 2.0 + aabr.max.x / 2.0)
     });
 
-    for cnt in groups.clone() {
-        sum_x += perimeter(bb(&split_buf[..cnt])) + perimeter(bb(&split_buf[cnt..]));
+    for split in dists.clone() {
+        sum_x += perimeter(bb(&split_buf[..split])) + perimeter(bb(&split_buf[split..]));
     }
 
     let mut sum_y = 0.0;
@@ -550,8 +578,8 @@ fn split_node<T, const M: usize>(
         OrderedFloat(aabr.min.y / 2.0 + aabr.max.y / 2.0)
     });
 
-    for cnt in groups.clone() {
-        sum_y += perimeter(bb(&split_buf[..cnt])) + perimeter(bb(&split_buf[cnt..]));
+    for split in dists.clone() {
+        sum_y += perimeter(bb(&split_buf[..split])) + perimeter(bb(&split_buf[split..]));
     }
 
     // Sort by the winning axis
@@ -567,28 +595,33 @@ fn split_node<T, const M: usize>(
 
     let mut best_dist = 0;
     let mut best_overlap_value = f32::INFINITY;
+    let mut best_area_value = f32::INFINITY;
 
-    for cnt in groups {
-        let group_1 = bb(&split_buf[..cnt]);
-        let group_2 = bb(&split_buf[cnt..]);
-        let overlap_value = area(group_1.intersection(group_2));
-
-        if relative_eq!(overlap_value, best_overlap_value) {
-            let area_value = area(group_1) + area(group_2);
-            let best_area_value =
-                area(bb(&split_buf[..best_dist])) + area(bb(&split_buf[best_dist..]));
-
-            if area_value < best_area_value {
-                best_dist = cnt;
+    for split in dists {
+        let group_1 = bb(&split_buf[..split]);
+        let group_2 = bb(&split_buf[split..]);
+        let overlap_value = {
+            let int = group_1.intersection(group_2);
+            if int.is_valid() {
+                area(int)
+            } else {
+                0.0
             }
-        } else if overlap_value < best_overlap_value {
+        };
+        let area_value = area(group_1) + area(group_2);
+
+        if overlap_value < best_overlap_value {
             best_overlap_value = overlap_value;
-            best_dist = cnt;
+            best_area_value = area_value;
+            best_dist = split;
+        } else if overlap_value == best_overlap_value && area_value < best_area_value {
+            best_area_value = area_value;
+            best_dist = split;
         }
     }
 
     debug_assert!(children.is_empty());
-    debug_assert_eq!(split_buf.len(), M + 1);
+    debug_assert_eq!(split_buf.len(), MAX + 1);
 
     let mut other = ArrayVec::new();
     other.extend(split_buf.drain(best_dist..));
@@ -616,7 +649,9 @@ mod tests {
 
     use super::*;
 
-    fn insert_rand<const M: usize>(rtree: &mut RTree<u64, M>) -> (u64, Aabr<f32>) {
+    fn insert_rand<const MIN: usize, const MAX: usize>(
+        rtree: &mut RTree<u64, MIN, MAX>,
+    ) -> (u64, Aabr<f32>) {
         static NEXT_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
 
         let id = NEXT_UNIQUE_ID.fetch_add(1, Ordering::SeqCst);
@@ -638,7 +673,7 @@ mod tests {
 
     #[test]
     fn insert_delete_interleaved() {
-        let mut rtree: RTree<u64, 8> = RTree::new();
+        let mut rtree: RTree<u64, 4, 8> = RTree::new();
 
         for i in 0..5_000 {
             insert_rand(&mut rtree);
@@ -665,7 +700,7 @@ mod tests {
 
     #[test]
     fn node_underfill() {
-        let mut rtree: RTree<u64, 8> = RTree::new();
+        let mut rtree: RTree<u64, 4, 8> = RTree::new();
 
         for i in 0..5_000 {
             insert_rand(&mut rtree);
@@ -693,7 +728,7 @@ mod tests {
 
     #[test]
     fn movement() {
-        let mut rtree: RTree<u64, 8> = RTree::new();
+        let mut rtree: RTree<u64, 4, 8> = RTree::new();
 
         for _ in 0..5_000 {
             insert_rand(&mut rtree);

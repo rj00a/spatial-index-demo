@@ -35,7 +35,7 @@ struct State {
     enable_rtree: bool,
     render_rtree: bool,
     render_objects: bool,
-    rtree: RTree<usize, 8>,
+    rtree: RTree<usize, 3, 8>,
     target_fps: f64,
     displayed_fps: f64,
     last_fps_update: Instant,
@@ -353,20 +353,20 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
         for (obj, &collides) in state.objects.iter().zip(&state.colliding_buf) {
             let top_left_pixel = pos_to_pixel(
                 state.window_dims,
-                Vec2::new(obj.pos.x - obj.dims.w / 2.0, obj.pos.y + obj.dims.h /
-        2.0),     );
-    
+                Vec2::new(obj.pos.x - obj.dims.w / 2.0, obj.pos.y + obj.dims.h / 2.0),
+            );
+
             let bottom_right_pixel = pos_to_pixel(
                 state.window_dims,
-                Vec2::new(obj.pos.x + obj.dims.w / 2.0, obj.pos.y - obj.dims.h /
-        2.0),     );
-    
+                Vec2::new(obj.pos.x + obj.dims.w / 2.0, obj.pos.y - obj.dims.h / 2.0),
+            );
+
             let color = if collides {
                 Color::RGBA(255, 0, 0, 128)
             } else {
                 Color::RGBA(0, 0, 0, 128)
             };
-    
+
             state.canvas.set_draw_color(color);
             state.canvas.fill_rect(Rect::new(
                 top_left_pixel.x,
@@ -387,7 +387,7 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
             let min = pos_to_pixel(state.window_dims, aabr.min);
             let max = pos_to_pixel(state.window_dims, aabr.max);
 
-            let _ = state.canvas.set_draw_color(color);
+            state.canvas.set_draw_color(color);
             let _ = state.canvas.draw_rect(Rect::new(
                 min.x,
                 max.y,
@@ -401,7 +401,7 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
 
     render_text(
         state,
-        &font,
+        font,
         Color::BLACK,
         &format!("Objects: {object_count}"),
         (5, 0),
@@ -417,7 +417,7 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
 
     render_text(
         state,
-        &font,
+        font,
         fps_color,
         &format!("FPS: {:.2}", avg_fps),
         (5, 20),
@@ -429,7 +429,7 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
         (Color::RGB(217, 20, 20), "R-Tree: Disabled")
     };
 
-    render_text(state, &font, rtree_text_color, rtree_text, (5, 40))?;
+    render_text(state, font, rtree_text_color, rtree_text, (5, 40))?;
 
     state.canvas.present();
 
