@@ -193,11 +193,10 @@ impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
                         *best_child_aabr = best_child.bounds();
 
                         if children_is_full {
-                            let other = split_node::<_, _, MIN, MAX>(
+                            let other = split_node::<_, MIN, MAX>(
                                 internal_split_buf,
                                 children,
                                 (new_node, new_node_aabr),
-                                |(_, child_aabr)| *child_aabr,
                             );
                             InsertResult::Split(Box::new(Node::Internal(other)))
                         } else {
@@ -209,12 +208,8 @@ impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
             }
             Self::Leaf(children) => {
                 if children.is_full() {
-                    let other = split_node::<_, _, MIN, MAX>(
-                        leaf_split_buf,
-                        children,
-                        (data, data_aabr),
-                        |(_, data_aabr)| *data_aabr,
-                    );
+                    let other =
+                        split_node::<_, MIN, MAX>(leaf_split_buf, children, (data, data_aabr));
                     debug_assert!(other.len() >= MIN);
 
                     InsertResult::Split(Box::new(Node::Leaf(other)))
@@ -549,34 +544,27 @@ fn overlap_insertion_heuristic<T>(data_aabr: Aabr<f32>, children: &[(T, Aabr<f32
 ///
 /// After returning, `children` contains half the data while the returned
 /// `ArrayVec` contains the other half for the new node.
-fn split_node<T, F: Fn(&T) -> Aabr<f32>, const MIN: usize, const MAX: usize>(
-    split_buf: &mut Vec<T>,
-    children: &mut ArrayVec<T, MAX>,
-    data: T,
-    get_aabr: F,
-) -> ArrayVec<T, MAX> {
+fn split_node<T, const MIN: usize, const MAX: usize>(
+    split_buf: &mut Vec<(T, Aabr<f32>)>,
+    children: &mut ArrayVec<(T, Aabr<f32>), MAX>,
+    data: (T, Aabr<f32>),
+) -> ArrayVec<(T, Aabr<f32>), MAX> {
     split_buf.extend(children.take());
     split_buf.push(data);
 
     let dists = MIN..MAX - MIN + 2;
 
-    let bb = |es: &[T]| es.iter().map(&get_aabr).reduce(Aabr::union).unwrap();
+    let bb = |es: &[(T, Aabr<f32>)]| es.iter().map(|e| e.1).reduce(Aabr::union).unwrap();
 
     let mut sum_x = 0.0;
-    split_buf.sort_unstable_by_key(|e| {
-        let aabr = get_aabr(e);
-        OrderedFloat(aabr.min.x / 2.0 + aabr.max.x / 2.0)
-    });
+    split_buf.sort_unstable_by_key(|e| OrderedFloat(e.1.min.x / 2.0 + e.1.max.x / 2.0));
 
     for split in dists.clone() {
         sum_x += perimeter(bb(&split_buf[..split])) + perimeter(bb(&split_buf[split..]));
     }
 
     let mut sum_y = 0.0;
-    split_buf.sort_unstable_by_key(|e| {
-        let aabr = get_aabr(e);
-        OrderedFloat(aabr.min.y / 2.0 + aabr.max.y / 2.0)
-    });
+    split_buf.sort_unstable_by_key(|e| OrderedFloat(e.1.min.y / 2.0 + e.1.max.y / 2.0));
 
     for split in dists.clone() {
         sum_y += perimeter(bb(&split_buf[..split])) + perimeter(bb(&split_buf[split..]));
@@ -584,11 +572,10 @@ fn split_node<T, F: Fn(&T) -> Aabr<f32>, const MIN: usize, const MAX: usize>(
 
     // Sort by the winning axis
     split_buf.sort_unstable_by_key(|e| {
-        let aabr = get_aabr(e);
         let (min, max) = if sum_x <= sum_y {
-            (aabr.min.x, aabr.max.x)
+            (e.1.min.x, e.1.max.x)
         } else {
-            (aabr.min.y, aabr.max.y)
+            (e.1.min.y, e.1.max.y)
         };
         OrderedFloat(min / 2.0 + max / 2.0)
     });
