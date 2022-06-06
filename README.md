@@ -4,7 +4,7 @@ https://user-images.githubusercontent.com/31678482/172040388-4710d5d3-1756-451f-
 
 This repo contains an implementation of an in-memory [R-Tree](https://en.wikipedia.org/wiki/R-tree) (specifically an [R*-Tree](https://en.wikipedia.org/wiki/R*-tree)). This is used for fast spatial queries such as "Find the nearest McDonalds." or "Find all entities that collide with this bounding box." or "Find all geometry that intersects with this ray."
 
-R-Trees and similar data structures are great for static data which does not change much after insertion. But what if our entries are constantly moving? This is especially relevant in games where entities could change their location arbitrarily. If we're not careful, the cost of updating the R-Tree every frame could be prohibitively expensive. 
+R-Trees and similar data structures are great for static data which does not change much after insertion. But what if our entries are constantly moving? This is especially relevant in games where entities could change their location arbitrarily. If we're not careful, the cost of updating the R-Tree every frame could become prohibitively expensive.
 
 To account for moving objects, we have a few tricks we can use to reduce the amount of work we need to do:
 * The bounding boxes of objects are "fattened" in the direction of their velocity. Objects are only adjusted in the R-Tree when their real bounding box is not completely contained within the fattened bounding box. This decreases query performance slightly, but greatly reduces the number of reinsertions that need to happen every frame.
@@ -18,9 +18,11 @@ For a situation as simple as this, a grid-based spatial partition would probably
 
 # Conclusion
 
-With the R-Tree enabled, I was able to reach over 80,000 objects loaded simultaneously before the framerate dipped below 144 FPS on my machine.
+With the R-Tree enabled, I was able to reach over 90,000 objects loaded simultaneously before the framerate dipped below 144 FPS on my modest machine. (This is without the overhead of rendering)
 
-To improve performance further, the `retain` function could be parallelized or a bulk-insert routine could be created, since entries are reinserted individually at the end of the `retain` function.
+To improve performance further, the `retain` function could be parallelized or a bulk-insert routine could be created, since entries are reinserted sequentially at the end of the `retain` function.
+
+Another potential improvement is to store all nodes in a [slab](https://docs.rs/slab/latest/slab/). This could increase cache locality and remove the overhead associated with malloc. I originally went with this approach but stopped once I ran into lifetime and borrowing issues.
 
 This implementation only supports two dimensions for the sake of clarity. However, a generalization to higher dimensions should be fairly straightforward.
 
