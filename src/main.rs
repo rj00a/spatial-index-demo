@@ -1,3 +1,4 @@
+mod bvh_basic;
 mod rtree;
 
 use std::error::Error;
@@ -5,9 +6,9 @@ use std::f32::consts::TAU;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bvh_basic::Bvh;
 use rand::Rng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
-use rtree::RTree;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
@@ -17,8 +18,6 @@ use sdl2::ttf::Font;
 use sdl2::video::{FullscreenType, Window, WindowContext};
 use sdl2::EventPump;
 use vek::{Aabr, Extent2, Vec2};
-
-use crate::rtree::QueryAction;
 
 struct State {
     canvas: Canvas<Window>,
@@ -32,10 +31,9 @@ struct State {
     pressing_t: bool,
     pressing_y: bool,
     pause_time: bool,
-    enable_rtree: bool,
-    render_rtree: bool,
+    render_bvh: bool,
     render_objects: bool,
-    rtree: RTree<usize, 3, 8>,
+    bvh: Bvh<usize>,
     target_fps: f64,
     displayed_fps: f64,
     last_fps_update: Instant,
@@ -59,17 +57,17 @@ impl Object {
         }
     }
 
-    fn fattened_aabr(&self) -> Aabr<f32> {
-        let aabr = self.aabr();
-        let v = self.velocity * 0.1;
+    // fn fattened_aabr(&self) -> Aabr<f32> {
+    //     let aabr = self.aabr();
+    //     let v = self.velocity * 0.1;
 
-        let displaced = Aabr {
-            min: aabr.min + v,
-            max: aabr.max + v,
-        };
+    //     let displaced = Aabr {
+    //         min: aabr.min + v,
+    //         max: aabr.max + v,
+    //     };
 
-        aabr.union(displaced)
-    }
+    //     aabr.union(displaced)
+    // }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -107,10 +105,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         pressing_t: false,
         pressing_y: false,
         pause_time: false,
-        enable_rtree: true,
-        render_rtree: true,
+        render_bvh: true,
         render_objects: true,
-        rtree: RTree::new(),
+        bvh: Bvh::new(),
         target_fps: 144.0,
         displayed_fps: 144.0,
         last_fps_update: Instant::now(),
@@ -158,26 +155,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     Keycode::E if !state.pressing_e => {
                         state.pressing_e = true;
-                        state.render_rtree = !state.render_rtree;
+                        state.render_bvh = !state.render_bvh;
                     }
                     Keycode::R if !state.pressing_r => {
                         state.pressing_r = true;
                         state.objects.clear();
-                        state.rtree.clear();
                     }
                     Keycode::T if !state.pressing_t => {
-                        state.pressing_t = true;
-                        state.enable_rtree = !state.enable_rtree;
-                        state.rtree.clear();
-                        if state.enable_rtree {
-                            for (obj_idx, obj) in state.objects.iter().enumerate() {
-                                state.rtree.insert(obj_idx, obj.fattened_aabr());
-                            }
-                        } else {
-                            state.rtree.clear();
-                        }
-                    }
-                    Keycode::Y if !state.pressing_y => {
                         state.pressing_y = true;
                         state.render_objects = !state.render_objects;
                     }
@@ -207,7 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             max: Vec2::new(aspect_ratio / 2.0, 0.5),
         };
 
-        if state.pressing_w && state.objects.len() < 100_000 {
+        if state.pressing_w && state.objects.len() < 500_000 {
             let mut rng = rand::thread_rng();
 
             let dims = Extent2::new(
@@ -233,9 +217,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 velocity: Vec2::new(angle.cos(), angle.sin()) * speed,
             };
 
-            if state.enable_rtree {
-                state.rtree.insert(state.objects.len(), obj.fattened_aabr());
-            }
+            // if state.enable_rtree {
+            //     state.rtree.insert(state.objects.len(), obj.fattened_aabr());
+            // }
 
             state.objects.push(obj);
             state.colliding_buf.push(false);
@@ -257,20 +241,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        let start_retain = Instant::now();
+        let start_rebuild = Instant::now();
 
-        if state.enable_rtree {
-            state.rtree.retain(
-                |_| true,
-                |&mut idx, fattened_aabr| {
-                    let obj = &state.objects[idx];
-                    if !fattened_aabr.contains_aabr(obj.aabr()) {
-                        *fattened_aabr = obj.fattened_aabr();
-                    }
-                    true
-                },
-            );
-        }
+        state.bvh.build(
+            state
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(idx, obj)| (idx, obj.aabr())),
+        );
 
         state.colliding_buf.clear();
         state.colliding_buf.resize(state.objects.len(), false);
@@ -285,27 +264,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let obj = &state.objects[idx];
                 let aabr = obj.aabr();
 
-                if state.enable_rtree {
-                    state.rtree.query(
+                if state
+                    .bvh
+                    .find(
                         |other_aabr| other_aabr.collides_with_aabr(aabr),
-                        |&other_idx, _| {
-                            if other_idx != idx
-                                && state.objects[other_idx].aabr().collides_with_aabr(aabr)
-                            {
-                                *c = true;
-                                QueryAction::Break
-                            } else {
-                                QueryAction::Continue
-                            }
-                        },
-                    );
-                } else {
-                    for (other_idx, other_obj) in state.objects.iter().enumerate() {
-                        if other_idx != idx && aabr.collides_with_aabr(other_obj.aabr()) {
-                            *c = true;
-                            break;
-                        }
-                    }
+                        |&other_idx, _| (other_idx != idx).then(|| ()),
+                    )
+                    .is_some()
+                {
+                    *c = true;
                 }
             });
 
@@ -324,16 +291,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.fps_sample_sum = 0.0;
             state.fps_sample_count = 0;
 
-            let retain_duration = start_query - start_retain;
+            let rebuild_duration = start_query - start_rebuild;
             let query_duration = done_query - start_query;
 
-            let retain_fraction = retain_duration.as_secs_f64() / elapsed.as_secs_f64();
+            let rebuild_fraction = rebuild_duration.as_secs_f64() / elapsed.as_secs_f64();
             let query_fraction = query_duration.as_secs_f64() / elapsed.as_secs_f64();
 
             println!(
-                "FPS: {:.2}, retain: {:.2}%, query: {:.2}%",
+                "FPS: {:.2}, rebuild: {:.2}%, query: {:.2}%",
                 state.displayed_fps,
-                retain_fraction * 100.0,
+                rebuild_fraction * 100.0,
                 query_fraction * 100.0,
             );
         }
@@ -377,13 +344,12 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let level_colors = [Color::BLUE, Color::GREEN, Color::MAGENTA, Color::RED];
+    let depth_colors = [Color::RED, Color::MAGENTA, Color::GREEN, Color::BLUE];
 
-    let depth = state.rtree.depth();
+    if state.render_bvh {
+        state.bvh.visit(|aabr, depth| {
+            let color = depth_colors[depth % depth_colors.len()];
 
-    if state.enable_rtree && state.render_rtree {
-        state.rtree.visit(|aabr, level| {
-            let color = level_colors[(depth + 1 - level) % level_colors.len()];
             let min = pos_to_pixel(state.window_dims, aabr.min);
             let max = pos_to_pixel(state.window_dims, aabr.max);
 
@@ -422,14 +388,6 @@ fn render(state: &mut State, font: &Font) -> Result<(), Box<dyn Error>> {
         &format!("FPS: {:.2}", avg_fps),
         (5, 20),
     )?;
-
-    let (rtree_text_color, rtree_text) = if state.enable_rtree {
-        (Color::BLACK, "R-Tree: Enabled")
-    } else {
-        (Color::RGB(217, 20, 20), "R-Tree: Disabled")
-    };
-
-    render_text(state, font, rtree_text_color, rtree_text, (5, 40))?;
 
     state.canvas.present();
 

@@ -144,6 +144,12 @@ impl<T, const MIN: usize, const MAX: usize> RTree<T, MIN, MAX> {
     }
 }
 
+impl<T, const MIN: usize, const MAX: usize> Default for RTree<T, MIN, MAX> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
     fn bounds(&self) -> Aabr<f32> {
         match self {
@@ -176,8 +182,6 @@ impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
     ) -> InsertResult<T, MIN, MAX> {
         match self {
             Self::Internal(children) => {
-                let children_is_full = children.is_full();
-
                 let (best_child, best_child_aabr) = {
                     let best = area_insertion_heuristic(data_aabr, children);
                     &mut children[best]
@@ -192,7 +196,7 @@ impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
                         let new_node_aabr = new_node.bounds();
                         *best_child_aabr = best_child.bounds();
 
-                        if children_is_full {
+                        if children.is_full() {
                             let other = split_node::<_, MIN, MAX>(
                                 internal_split_buf,
                                 children,
