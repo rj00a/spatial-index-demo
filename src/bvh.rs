@@ -1,5 +1,5 @@
-use ordered_float::OrderedFloat;
-use rayon::slice::ParallelSliceMut;
+use std::mem;
+
 use vek::Aabr;
 
 #[derive(Clone)]
@@ -65,11 +65,10 @@ impl<T: Send> Bvh<T> {
         }
 
         self.root = build_rec(
-            (leaf_count / 2) as NodeIdx,
+            0,
             bb(&self.leaf_nodes),
             &mut self.internal_nodes,
             &mut self.leaf_nodes,
-            None,
             leaf_count as NodeIdx,
         );
 
@@ -128,10 +127,11 @@ impl<T: Send> Bvh<T> {
             f(leaf.bb, depth);
         } else {
             let internal = &self.internal_nodes[idx as usize];
-            f(internal.bb, depth);
 
             self.visit_rec(internal.left, depth + 1, f);
             self.visit_rec(internal.right, depth + 1, f);
+
+            f(internal.bb, depth);
         }
     }
 }
@@ -141,7 +141,6 @@ fn build_rec<T: Send>(
     bounds: Aabr<f32>,
     internal_nodes: &mut [InternalNode],
     leaf_nodes: &mut [LeafNode<T>],
-    leaves_sorted_by: Option<SplitAxis>,
     total_leaf_count: NodeIdx,
 ) -> NodeIdx {
     debug_assert_eq!(leaf_nodes.len() - 1, internal_nodes.len());
@@ -154,23 +153,20 @@ fn build_rec<T: Send>(
     debug_assert!(bounds.is_valid());
     let dims = bounds.max - bounds.min;
 
-    let leaves_sorted_by = if dims.x >= dims.y {
-        if leaves_sorted_by != Some(SplitAxis::X) {
-            leaf_nodes.par_sort_unstable_by_key(|leaf| {
-                OrderedFloat(leaf.bb.min.x / 2.0 + leaf.bb.max.x / 2.0)
-            })
-        }
-        SplitAxis::X
+    let mut split = if dims.x >= dims.y {
+        let mid = bounds.min.x / 2.0 + bounds.max.x / 2.0;
+        partition(leaf_nodes, |l| l.bb.min.x / 2.0 + l.bb.max.x / 2.0 <= mid)
     } else {
-        if leaves_sorted_by != Some(SplitAxis::Y) {
-            leaf_nodes.par_sort_unstable_by_key(|leaf| {
-                OrderedFloat(leaf.bb.min.y / 2.0 + leaf.bb.max.y / 2.0)
-            })
-        }
-        SplitAxis::Y
+        let mid = bounds.min.y / 2.0 + bounds.max.y / 2.0;
+        partition(leaf_nodes, |l| l.bb.min.y / 2.0 + l.bb.max.y / 2.0 <= mid)
     };
 
-    let split = leaf_nodes.len() / 2;
+    // Handle edge cases with the partitioning.
+    if split == 0 {
+        split += 1;
+    } else if split == leaf_nodes.len() {
+        split -= 1;
+    }
 
     let (leaves_left, leaves_right) = leaf_nodes.split_at_mut(split);
 
@@ -180,21 +176,19 @@ fn build_rec<T: Send>(
     let (left, right) = rayon::join(
         || {
             build_rec(
-                idx - div_ceil(leaves_left.len(), 2) as NodeIdx,
+                idx,
                 bb(leaves_left),
                 internal_left,
                 leaves_left,
-                Some(leaves_sorted_by),
                 total_leaf_count,
             )
         },
         || {
             build_rec(
-                idx + leaves_right.len() as NodeIdx / 2,
+                idx + split as NodeIdx,
                 bb(leaves_right),
                 internal_right,
                 leaves_right,
-                Some(leaves_sorted_by),
                 total_leaf_count,
             )
         },
@@ -204,17 +198,29 @@ fn build_rec<T: Send>(
     internal.left = left;
     internal.right = right;
 
-    idx - 1
+    idx + split as NodeIdx - 1
 }
 
-fn div_ceil(n: usize, d: usize) -> usize {
-    n / d + (n % d != 0) as usize
-}
+fn partition<T>(s: &mut [T], mut pred: impl FnMut(&T) -> bool) -> usize {
+    let mut it = s.iter_mut();
+    let mut true_count = 0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SplitAxis {
-    X,
-    Y,
+    while let Some(head) = it.find(|x| {
+        if pred(x) {
+            true_count += 1;
+            false
+        } else {
+            true
+        }
+    }) {
+        if let Some(tail) = it.rfind(|x| pred(x)) {
+            mem::swap(head, tail);
+            true_count += 1;
+        } else {
+            break;
+        }
+    }
+    true_count
 }
 
 fn bb<T>(leaves: &[LeafNode<T>]) -> Aabr<f32> {

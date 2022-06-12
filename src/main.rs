@@ -1,4 +1,5 @@
-mod bvh_basic;
+mod bvh;
+#[allow(unused)]
 mod rtree;
 
 use std::error::Error;
@@ -6,7 +7,7 @@ use std::f32::consts::TAU;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bvh_basic::Bvh;
+use bvh::Bvh;
 use rand::Rng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use sdl2::event::{Event, WindowEvent};
