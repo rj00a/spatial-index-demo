@@ -34,7 +34,7 @@ struct State {
     pause_time: bool,
     render_bvh: bool,
     render_objects: bool,
-    bvh: Bvh<usize>,
+    bvh: Bvh<u32>,
     target_fps: f64,
     displayed_fps: f64,
     last_fps_update: Instant,
@@ -57,18 +57,6 @@ impl Object {
             max: self.pos + self.dims / 2.0,
         }
     }
-
-    // fn fattened_aabr(&self) -> Aabr<f32> {
-    //     let aabr = self.aabr();
-    //     let v = self.velocity * 0.1;
-
-    //     let displaced = Aabr {
-    //         min: aabr.min + v,
-    //         max: aabr.max + v,
-    //     };
-
-    //     aabr.union(displaced)
-    // }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -194,36 +182,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if state.pressing_w && state.objects.len() < 500_000 {
             let mut rng = rand::thread_rng();
+            for _ in 0..10 {
+                let dims = Extent2::new(
+                    rng.gen_range(0.003..=MAX_RECT_SIZE),
+                    rng.gen_range(0.003..=MAX_RECT_SIZE),
+                );
 
-            let dims = Extent2::new(
-                rng.gen_range(0.003..=MAX_RECT_SIZE),
-                rng.gen_range(0.003..=MAX_RECT_SIZE),
-            );
+                let center = Vec2::new(
+                    rng.gen_range(
+                        arena_bounds.min.x + dims.w / 2.0..=arena_bounds.max.x - dims.w / 2.0,
+                    ),
+                    rng.gen_range(
+                        arena_bounds.min.y + dims.h / 2.0..=arena_bounds.max.y - dims.h / 2.0,
+                    ),
+                );
 
-            let center = Vec2::new(
-                rng.gen_range(
-                    arena_bounds.min.x + dims.w / 2.0..=arena_bounds.max.x - dims.w / 2.0,
-                ),
-                rng.gen_range(
-                    arena_bounds.min.y + dims.h / 2.0..=arena_bounds.max.y - dims.h / 2.0,
-                ),
-            );
+                let speed = rng.gen_range(0.01..=0.05);
+                let angle = rng.gen_range(0.0..TAU);
 
-            let speed = rng.gen_range(0.01..=0.05);
-            let angle = rng.gen_range(0.0..TAU);
+                let obj = Object {
+                    pos: center,
+                    dims,
+                    velocity: Vec2::new(angle.cos(), angle.sin()) * speed,
+                };
 
-            let obj = Object {
-                pos: center,
-                dims,
-                velocity: Vec2::new(angle.cos(), angle.sin()) * speed,
-            };
-
-            // if state.enable_rtree {
-            //     state.rtree.insert(state.objects.len(), obj.fattened_aabr());
-            // }
-
-            state.objects.push(obj);
-            state.colliding_buf.push(false);
+                state.objects.push(obj);
+                state.colliding_buf.push(false);
+            }
         }
 
         let delta = state.target_fps.recip() as f32 * !state.pause_time as u8 as f32;
@@ -249,7 +234,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .objects
                 .iter()
                 .enumerate()
-                .map(|(idx, obj)| (idx, obj.aabr())),
+                .map(|(idx, obj)| (idx as u32, obj.aabr())),
         );
 
         state.colliding_buf.clear();
@@ -269,7 +254,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .bvh
                     .find(
                         |other_aabr| other_aabr.collides_with_aabr(aabr),
-                        |&other_idx, _| (other_idx != idx).then(|| ()),
+                        |&other_idx, _| (other_idx != idx as u32).then(|| ()),
                     )
                     .is_some()
                 {
