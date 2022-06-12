@@ -95,12 +95,12 @@ impl<T, const MIN: usize, const MAX: usize> RTree<T, MIN, MAX> {
         self.reinsert_buf.shrink_to(16);
     }
 
-    pub fn query(
-        &self,
-        mut collides: impl FnMut(Aabr<f32>) -> bool,
-        mut callback: impl FnMut(&T, Aabr<f32>) -> QueryAction,
-    ) {
-        self.root.query(&mut collides, &mut callback);
+    pub fn find<C, F, U>(&self, mut collides: C, mut find: F)
+    where
+        C: FnMut(Aabr<f32>) -> bool,
+        F: FnMut(&T, Aabr<f32>) -> Option<U>,
+    {
+        self.root.find(&mut collides, &mut find);
     }
 
     pub fn clear(&mut self) {
@@ -225,17 +225,17 @@ impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
         }
     }
 
-    fn query(
-        &self,
-        collides: &mut impl FnMut(Aabr<f32>) -> bool,
-        callback: &mut impl FnMut(&T, Aabr<f32>) -> QueryAction,
-    ) -> QueryAction {
+    fn find<C, F, U>(&self, collides: &mut C, find: &mut F) -> Option<U>
+    where
+        C: FnMut(Aabr<f32>) -> bool,
+        F: FnMut(&T, Aabr<f32>) -> Option<U>,
+    {
         match self {
             Node::Internal(children) => {
                 for child in children {
                     if collides(child.1) {
-                        if let QueryAction::Break = child.0.query(collides, callback) {
-                            return QueryAction::Break;
+                        if let Some(found) = child.0.find(collides, find) {
+                            return Some(found);
                         }
                     }
                 }
@@ -243,14 +243,14 @@ impl<T, const MIN: usize, const MAX: usize> Node<T, MIN, MAX> {
             Node::Leaf(children) => {
                 for (child, child_aabr) in children {
                     if collides(*child_aabr) {
-                        if let QueryAction::Break = callback(child, *child_aabr) {
-                            return QueryAction::Break;
+                        if let Some(found) = find(child, *child_aabr) {
+                            return Some(found);
                         }
                     }
                 }
             }
         }
-        QueryAction::Continue
+        None
     }
 
     fn retain(
