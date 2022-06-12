@@ -1,5 +1,7 @@
 use std::mem;
 
+use approx::relative_eq;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use vek::Aabr;
 
 #[derive(Clone)]
@@ -24,7 +26,7 @@ struct LeafNode<T> {
 
 type NodeIdx = u32;
 
-impl<T: Send> Bvh<T> {
+impl<T: Send + Sync> Bvh<T> {
     pub fn new() -> Self {
         Self {
             internal_nodes: Vec::new(),
@@ -64,13 +66,21 @@ impl<T: Send> Bvh<T> {
             panic!("too many elements in BVH");
         }
 
+        let id = self.leaf_nodes[0].bb;
+        let scene_bounds = self
+            .leaf_nodes
+            .par_iter()
+            .map(|l| l.bb)
+            .reduce(|| id, Aabr::union);
+
         self.root = build_rec(
             0,
-            bb(&self.leaf_nodes),
+            scene_bounds,
             &mut self.internal_nodes,
             &mut self.leaf_nodes,
             leaf_count as NodeIdx,
-        );
+        )
+        .0;
 
         debug_assert_eq!(self.internal_nodes.len(), self.leaf_nodes.len() - 1);
     }
@@ -142,30 +152,59 @@ fn build_rec<T: Send>(
     internal_nodes: &mut [InternalNode],
     leaf_nodes: &mut [LeafNode<T>],
     total_leaf_count: NodeIdx,
-) -> NodeIdx {
+) -> (NodeIdx, Aabr<f32>) {
     debug_assert_eq!(leaf_nodes.len() - 1, internal_nodes.len());
 
     if leaf_nodes.len() == 1 {
         // Leaf node
-        return total_leaf_count - 1 + idx;
+        return (total_leaf_count - 1 + idx, leaf_nodes[0].bb);
     }
 
     debug_assert!(bounds.is_valid());
     let dims = bounds.max - bounds.min;
 
-    let mut split = if dims.x >= dims.y {
-        let mid = bounds.min.x / 2.0 + bounds.max.x / 2.0;
-        partition(leaf_nodes, |l| l.bb.min.x / 2.0 + l.bb.max.x / 2.0 <= mid)
+    let (mut split, bounds_left, bounds_right) = if dims.x >= dims.y {
+        let mid = middle(bounds.min.x, bounds.max.x);
+        let [bounds_left, bounds_right] = bounds.split_at_x(mid);
+
+        let p = partition(leaf_nodes, |l| middle(l.bb.min.x, l.bb.max.x) <= mid);
+
+        (p, bounds_left, bounds_right)
     } else {
-        let mid = bounds.min.y / 2.0 + bounds.max.y / 2.0;
-        partition(leaf_nodes, |l| l.bb.min.y / 2.0 + l.bb.max.y / 2.0 <= mid)
+        let mid = middle(bounds.min.y, bounds.max.y);
+        let [bounds_left, bounds_right] = bounds.split_at_y(mid);
+
+        let p = partition(leaf_nodes, |l| middle(l.bb.min.y, l.bb.max.y) <= mid);
+
+        (p, bounds_left, bounds_right)
     };
 
-    // Handle edge cases with the partitioning.
+    // Check if one of the halves is empty. (We can't have empty nodes)
+    // Also take care to handle the edge case of overlapping points.
     if split == 0 {
-        split += 1;
+        if relative_eq!(bounds_right.min, bounds_right.max) {
+            split += 1;
+        } else {
+            return build_rec(
+                idx,
+                bounds_right,
+                internal_nodes,
+                leaf_nodes,
+                total_leaf_count,
+            );
+        }
     } else if split == leaf_nodes.len() {
-        split -= 1;
+        if relative_eq!(bounds_left.min, bounds_left.max) {
+            split -= 1;
+        } else {
+            return build_rec(
+                idx,
+                bounds_left,
+                internal_nodes,
+                leaf_nodes,
+                total_leaf_count,
+            );
+        }
     }
 
     let (leaves_left, leaves_right) = leaf_nodes.split_at_mut(split);
@@ -173,11 +212,11 @@ fn build_rec<T: Send>(
     let (internal_left, internal_right) = internal_nodes.split_at_mut(split);
     let (internal, internal_left) = internal_left.split_last_mut().unwrap();
 
-    let (left, right) = rayon::join(
+    let ((left, bounds_left), (right, bounds_right)) = rayon::join(
         || {
             build_rec(
                 idx,
-                bb(leaves_left),
+                bounds_left,
                 internal_left,
                 leaves_left,
                 total_leaf_count,
@@ -186,7 +225,7 @@ fn build_rec<T: Send>(
         || {
             build_rec(
                 idx + split as NodeIdx,
-                bb(leaves_right),
+                bounds_right,
                 internal_right,
                 leaves_right,
                 total_leaf_count,
@@ -194,11 +233,11 @@ fn build_rec<T: Send>(
         },
     );
 
-    internal.bb = bounds;
+    internal.bb = bounds_left.union(bounds_right);
     internal.left = left;
     internal.right = right;
 
-    idx + split as NodeIdx - 1
+    (idx + split as NodeIdx - 1, internal.bb)
 }
 
 fn partition<T>(s: &mut [T], mut pred: impl FnMut(&T) -> bool) -> usize {
@@ -223,15 +262,11 @@ fn partition<T>(s: &mut [T], mut pred: impl FnMut(&T) -> bool) -> usize {
     true_count
 }
 
-fn bb<T>(leaves: &[LeafNode<T>]) -> Aabr<f32> {
-    leaves
-        .iter()
-        .map(|l| l.bb)
-        .reduce(Aabr::union)
-        .expect("leaf slice is empty")
+fn middle(a: f32, b: f32) -> f32 {
+    (a + b) / 2.0
 }
 
-impl<T: Send> Default for Bvh<T> {
+impl<T: Send + Sync> Default for Bvh<T> {
     fn default() -> Self {
         Self::new()
     }
