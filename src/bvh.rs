@@ -271,3 +271,34 @@ impl<T: Send + Sync> Default for Bvh<T> {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty() {
+        let mut bvh = Bvh::new();
+
+        bvh.find(|_| false, |_, _| Some(()));
+        bvh.build([]);
+
+        bvh.build([(5, Aabr::default())]);
+        bvh.find(|_| false, |_, _| Some(()));
+    }
+
+    #[test]
+    fn overlapping() {
+        let mut bvh = Bvh::new();
+
+        bvh.build([
+            ((), Aabr::default()),
+            ((), Aabr::default()),
+            ((), Aabr::default()),
+            ((), Aabr::default()),
+            ((), Aabr::new_empty(5.0.into()))
+        ]);
+
+        bvh.find(|_| false, |_, _| Some(()));
+    }
+}
